@@ -127,6 +127,19 @@ export class Server {
       });
     });
 
+    this.fastify.get('/whoami', async (request: FastifyRequest, reply: FastifyReply) => {
+      if (!this.isAuthorized(request)) {
+        reply.code(401).send({ error: 'unauthorized: bearer token required' });
+        return;
+      }
+      reply.status(HTTP_STATUS.OK).send({
+        app: 'dsh-edge-mcp',
+        pid: process.pid,
+        sessions: this.sessions.size,
+        startedAt: Date.now() - Math.round(process.uptime() * 1000),
+      });
+    });
+
     this.fastify.get('/health', async (_request: FastifyRequest, reply: FastifyReply) => {
       reply.status(HTTP_STATUS.OK).send({
         status: 'ok',
@@ -192,29 +205,41 @@ export class Server {
   private ensureAuthToken(): string {
     if (this.authToken) return this.authToken;
     const dir = join(process.env.LOCALAPPDATA || homedir(), 'dsh-edge-mcp');
+    this.authTokenPath = join(dir, 'token.txt');
     try {
-      mkdirSync(dir, { recursive: true });
-    } catch {
-      // ignore
-    }
-    const tokenPath = join(dir, 'token.txt');
-    this.authTokenPath = tokenPath;
-    try {
-      if (existsSync(tokenPath)) {
-        const existing = readFileSync(tokenPath, 'utf8').trim();
+      if (existsSync(this.authTokenPath)) {
+        const existing = readFileSync(this.authTokenPath, 'utf8').trim();
         if (existing.length >= 16) {
           this.authToken = existing;
           return existing;
         }
       }
-      const fresh = randomBytes(32).toString('hex');
-      writeFileSync(tokenPath, fresh, { encoding: 'utf8', mode: 0o600 });
-      this.authToken = fresh;
-      return fresh;
     } catch {
-      // Last resort: in-memory token (clients cannot read it, so auth fails closed)
-      this.authToken = randomBytes(32).toString('hex');
-      return this.authToken;
+      // fall through to in-memory generation
+    }
+    // Do NOT write the file yet: only the instance that actually owns the port
+    // may publish a token, otherwise a stand-by instance could rotate it and
+    // break every running client (401 storm).
+    this.authToken = randomBytes(32).toString('hex');
+    return this.authToken;
+  }
+
+  /** Publish the token file; called only after this instance bound the port. */
+  private persistAuthToken(): void {
+    if (!this.authToken || !this.authTokenPath) return;
+    try {
+      mkdirSync(join(this.authTokenPath, '..'), { recursive: true });
+    } catch {
+      // ignore
+    }
+    try {
+      if (existsSync(this.authTokenPath)) {
+        const existing = readFileSync(this.authTokenPath, 'utf8').trim();
+        if (existing.length >= 16) return; // never overwrite a live token
+      }
+      writeFileSync(this.authTokenPath, this.authToken, { encoding: 'utf8', mode: 0o600 });
+    } catch (error: any) {
+      console.warn('[mcp] could not persist auth token:', error?.message || error);
     }
   }
 
@@ -449,6 +474,7 @@ export class Server {
       process.env.MCP_HTTP_PORT = String(port);
 
       this.isRunning = true;
+      this.persistAuthToken();
 
       if (!this.reaperTimer) {
         this.reaperTimer = setInterval(() => {
@@ -463,10 +489,13 @@ export class Server {
         // is one of ours, stay alive quietly: the extension will route through it.
         for (let attempt = 0; attempt < 20; attempt += 1) {
           try {
-            const res = await fetch('http://127.0.0.1:' + port + '/health');
+            // Authenticated probe: an impostor cannot answer /whoami with our token.
+            const res = await fetch('http://127.0.0.1:' + port + '/whoami', {
+              headers: { authorization: 'Bearer ' + this.ensureAuthToken() },
+            });
             const body: any = await res.json();
-            if (body && body.app === 'dsh-edge-mcp') {
-              console.warn('[mcp] port ' + port + ' already served by another dsh-edge-mcp host; standing by');
+            if (res.ok && body && body.app === 'dsh-edge-mcp') {
+              console.warn('[mcp] port ' + port + ' already served by our own host; standing by');
               return;
             }
           } catch {

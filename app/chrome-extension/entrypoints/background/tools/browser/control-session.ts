@@ -16,6 +16,7 @@ import { installCursor, setFaviconBadge, hideCursor } from '@/utils/page-overlay
 
 export const CONTROL_SESSION_OWNER = 'control-session';
 const STATE_KEY = 'dsh.controlSession';
+const SUSPEND_KEY = 'dsh.controlSuspended';
 
 export interface ControlSessionPolicy {
   background: boolean;
@@ -66,6 +67,19 @@ export function setActiveOwner(owner: string): void {
 
 export function touchActivity(): void {
   lastActivityAt = Date.now();
+}
+
+export function getSessionOwner(): string {
+  return current?.owner || '';
+}
+
+/** True when the user canceled debugging for this owner and we must not act. */
+export function isSuspendedFor(owner: string): boolean {
+  return !!owner && suspendedOwner === owner;
+}
+
+export function getSuspensionOwner(): string {
+  return suspendedOwner;
 }
 
 export function isControlSessionActive(): boolean {
@@ -165,8 +179,15 @@ export async function beginControlSession(
       'E_SESSION_BUSY: another agent session (' + current.owner + ') owns the browser control session',
     );
   }
-  if (!current) {
+  if (suspendedOwner === activeOwner) {
     suspendedOwner = '';
+    try {
+      void chrome.storage.session.remove(SUSPEND_KEY);
+    } catch {
+      // ignore
+    }
+  }
+  if (!current) {
     current = {
       sessionId: 'dsh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
       owner: activeOwner,
@@ -206,11 +227,15 @@ export async function endControlSession(force = false): Promise<ControlSessionSt
 /** Re-attach pinned tabs after a service-worker restart. */
 export async function restoreControlSession(): Promise<void> {
   try {
-    const stored = await chrome.storage.session.get(STATE_KEY);
+    const stored = await chrome.storage.session.get([STATE_KEY, SUSPEND_KEY]);
+    const suspended = stored?.[SUSPEND_KEY] as string | undefined;
+    if (suspended) suspendedOwner = suspended;
     const state = stored?.[STATE_KEY] as ControlSessionState | undefined;
     if (!state) return;
     current = state;
     pinned.clear();
+    // A suspension survives the SW restart: never silently re-attach.
+    if (suspendedOwner && suspendedOwner === state.owner) return;
     for (const tabId of state.tabIds || []) await ensurePinned(tabId);
   } catch {
     // ignore
@@ -224,6 +249,11 @@ try {
     if (!current) return;
     if (typeof source.tabId !== 'number') return;
     suspendedOwner = current.owner;
+    try {
+      void chrome.storage.session.set({ [SUSPEND_KEY]: suspendedOwner });
+    } catch {
+      // ignore
+    }
     void endControlSession(true).catch(() => {});
     console.warn('[control-session] user canceled debugging; session suspended');
   });
@@ -305,6 +335,30 @@ class ControlSessionTool {
       } catch {
         // debugger API unavailable
       }
+      if (action === 'policy') {
+        const mode = String(args?.confirmMode || '');
+        if (!['narrow', 'always', 'off'].includes(mode)) {
+          return createErrorResponse('E_BAD_ARG: confirmMode must be narrow | always | off');
+        }
+        try {
+          await chrome.storage.local.set({ 'dsh.policy': { confirmMode: mode } });
+        } catch {
+          return createErrorResponse('E_STORAGE: could not persist policy');
+        }
+        return ok({ ok: true, action: 'policy', confirmMode: mode });
+      }
+
+      if (action === 'audit') {
+        const limit = Math.max(1, Math.min(200, Number(args?.limit) || 50));
+        try {
+          const got = await chrome.storage.local.get('dsh.audit');
+          const list = Array.isArray(got?.['dsh.audit']) ? got['dsh.audit'] : [];
+          return ok({ ok: true, action: 'audit', total: list.length, entries: list.slice(-limit) });
+        } catch {
+          return ok({ ok: true, action: 'audit', total: 0, entries: [] });
+        }
+      }
+
       return ok({
         ok: true,
         action: 'status',
@@ -312,6 +366,7 @@ class ControlSessionTool {
         pinnedTabs: [...pinned],
         attachedTabs: cdpSessionManager.attachedTabIds(),
         debuggerTargets,
+        suspendedOwner: suspendedOwner || null,
       });
     } catch (error) {
       return createErrorResponse(
