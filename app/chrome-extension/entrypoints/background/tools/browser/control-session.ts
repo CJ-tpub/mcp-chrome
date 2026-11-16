@@ -189,7 +189,9 @@ export async function beginControlSession(
     // Owner vanished (crash / host restart): reclaim after 2 quiet minutes.
     await endControlSession(true);
   }
-  if (suspendedOwner === activeOwner) {
+  if (suspendedOwner) {
+    // Any session may resume: the user already saw the bar disappear and the
+    // new session re-establishes control explicitly.
     suspendedOwner = '';
     try {
       void chrome.storage.session.remove(SUSPEND_KEY);

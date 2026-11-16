@@ -30,8 +30,23 @@ const READONLY_TOOLS = new Set([
   'chrome_read_page',
   'chrome_screenshot',
   'chrome_get_web_content',
-  'chrome_control_session',
 ]);
+
+/** control_session is only readonly for status/audit; policy mutates state. */
+function isReadonlyCall(name: string, args: any): boolean {
+  if (name === 'chrome_control_session') {
+    const action = String((args && args.action) || 'status');
+    return action === 'status' || action === 'audit';
+  }
+  return READONLY_TOOLS.has(name);
+}
+
+/** begin/end must stay callable while suspended, otherwise recovery is impossible. */
+function isSessionControl(name: string, args: any): boolean {
+  if (name !== 'chrome_control_session') return false;
+  const action = String((args && args.action) || 'status');
+  return action === 'begin' || action === 'end';
+}
 
 const tabLocks = new Map<number, Promise<unknown>>();
 
@@ -148,7 +163,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
     setActiveOwner(sessionId);
 
     const owner = getSessionOwner();
-    const readonly = READONLY_TOOLS.has(param.name);
+    const readonly = isReadonlyCall(param.name, param.args);
     // Ownership: a session that does not own the control session may only read.
     if (owner && !readonly && owner !== sessionId) {
       return createErrorResponse(
@@ -156,7 +171,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
       );
     }
     // The user canceled debugging: hold every session until someone begins again.
-    if (!readonly && isSuspendedFor(sessionId)) {
+    if (!readonly && !isSessionControl(param.name, param.args) && isSuspendedFor(sessionId)) {
       return createErrorResponse(
         'E_SESSION_SUSPENDED: the user canceled browser debugging. Ask the user to re-approve, then call control_session begin again.',
       );
