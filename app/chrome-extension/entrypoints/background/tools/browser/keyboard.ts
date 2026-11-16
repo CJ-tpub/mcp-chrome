@@ -23,8 +23,10 @@ class KeyboardTool extends BaseBrowserToolExecutor {
   /**
    * Execute keyboard operation
    */
-  async execute(args: KeyboardToolParams): Promise<ToolResult> {
-    const { keys, selector, selectorType = 'css', delay = TIMEOUTS.KEYBOARD_DELAY } = args;
+  async execute(args: KeyboardToolParams & { text?: string }): Promise<ToolResult> {
+    // Accept both `keys` and the more common `text` spelling from tool callers.
+    const { selector, selectorType = 'css', delay = TIMEOUTS.KEYBOARD_DELAY } = args;
+    const keys = (args as any).keys ?? (args as any).text;
 
     console.log(`Starting keyboard operation with options:`, args);
 

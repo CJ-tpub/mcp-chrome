@@ -8,6 +8,7 @@ import { keyboardTool } from './keyboard';
 import { screenshotTool } from './screenshot';
 import { screenshotContextManager, scaleCoordinates } from '@/utils/screenshot-context';
 import { cdpSessionManager } from '@/utils/cdp-session-manager';
+import { installCursor, showCursor } from '@/utils/page-overlay';
 import {
   captureFrameOnAction,
   isAutoCaptureActive,
@@ -80,7 +81,24 @@ interface ComputerParams {
 // Minimal CDP helper encapsulated here to avoid scattering CDP code
 class CDPHelper {
   static async attach(tabId: number): Promise<void> {
+    const already = cdpSessionManager.isAttached(tabId);
     await cdpSessionManager.attach(tabId, 'computer');
+    if (already) return;
+    void installCursor(tabId);
+    // Make a background tab behave as if focused (input + rendering) without
+    // bringing it, or its window, to the foreground.
+    try {
+      await cdpSessionManager.sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', {
+        enabled: true,
+      });
+    } catch {
+      // older Chromium: ignore
+    }
+    try {
+      await cdpSessionManager.sendCommand(tabId, 'Page.setWebLifecycleState', { state: 'active' });
+    } catch {
+      // ignore
+    }
   }
 
   static async detach(tabId: number): Promise<void> {
@@ -113,6 +131,9 @@ class CDPHelper {
     if (opts.type === 'mouseWheel') {
       params.deltaX = opts.deltaX || 0;
       params.deltaY = opts.deltaY || 0;
+    }
+    if (opts.type === 'mouseMoved' || opts.type === 'mousePressed') {
+      void showCursor(tabId, opts.x, opts.y, opts.type === 'mousePressed');
     }
     await this.send(tabId, 'Input.dispatchMouseEvent', params);
   }
@@ -500,6 +521,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
         if (params.ref) {
           // Prefer DOM click via ref
           const domResult = await clickTool.execute({
+            tabId: tab.id as number,
             ref: params.ref,
             waitForNavigation: false,
             timeout: TIMEOUTS.DEFAULT_WAIT * 5,
@@ -511,6 +533,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
         if (params.selector) {
           // Support selector-based click
           const domResult = await clickTool.execute({
+            tabId: tab.id as number,
             selector: params.selector,
             selectorType: params.selectorType,
             frameId: params.frameId,
@@ -546,7 +569,59 @@ class ComputerTool extends BaseBrowserToolExecutor {
         }
         const coord = project(params.coordinates)!;
         // Prefer DOM path via existing click tool
+        // Prefer a real CDP input event (isTrusted=true, triggers the cursor
+        // overlay) and fall back to the DOM click helper only if CDP fails.
+        try {
+          const button = params.action === 'right_click' ? 'right' : 'left';
+          await CDPHelper.attach(tab.id);
+          try {
+            await CDPHelper.dispatchMouseEvent(tab.id, {
+              type: 'mouseMoved',
+              x: coord.x,
+              y: coord.y,
+              buttons: 0,
+            });
+            await CDPHelper.dispatchMouseEvent(tab.id, {
+              type: 'mousePressed',
+              x: coord.x,
+              y: coord.y,
+              button,
+              clickCount: 1,
+              modifiers: modifiersMask,
+              buttons: button === 'right' ? 2 : 1,
+            });
+            await CDPHelper.dispatchMouseEvent(tab.id, {
+              type: 'mouseReleased',
+              x: coord.x,
+              y: coord.y,
+              button,
+              clickCount: 1,
+              modifiers: modifiersMask,
+              buttons: 0,
+            });
+          } finally {
+            await CDPHelper.detach(tab.id);
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  message: 'Element clicked successfully (CDP input)',
+                  coordinates: coord,
+                  trusted: true,
+                  tabId: tab.id,
+                }),
+              },
+            ],
+            isError: false,
+          };
+        } catch (cdpError) {
+          console.warn('CDP click failed, falling back to DOM click:', cdpError);
+        }
         const domResult = await clickTool.execute({
+          tabId: tab.id as number,
           coordinates: coord,
           waitForNavigation: false,
           timeout: TIMEOUTS.DEFAULT_WAIT * 5,
@@ -932,6 +1007,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
           // Optional focus via ref before typing
           if (params.ref) {
             await clickTool.execute({
+              tabId: tab.id as number,
               ref: params.ref,
               waitForNavigation: false,
               timeout: TIMEOUTS.DEFAULT_WAIT * 5,
@@ -958,6 +1034,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
           await CDPHelper.detach(tab.id);
           // Fallback to DOM-based keyboard tool
           const res = await keyboardTool.execute({
+            tabId: tab.id as number,
             keys: params.text.split('').join(','),
             delay: 0,
             selector: undefined,
@@ -971,6 +1048,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
         }
         // Reuse existing fill tool to leverage robust DOM event behavior
         const res = await fillTool.execute({
+          tabId: tab.id as number,
           selector: params.selector as any,
           selectorType: params.selectorType as any,
           ref: params.ref as any,
@@ -994,6 +1072,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
           }
           try {
             const r = await fillTool.execute({
+              tabId: tab.id as number,
               ref: item.ref as any,
               value: item.value as any,
             } as any);
@@ -1038,6 +1117,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
           // Optional focus via ref before key events
           if (params.ref) {
             await clickTool.execute({
+              tabId: tab.id as number,
               ref: params.ref,
               waitForNavigation: false,
               timeout: TIMEOUTS.DEFAULT_WAIT * 5,
@@ -1066,7 +1146,10 @@ class ComputerTool extends BaseBrowserToolExecutor {
           const keysStr = tokens.join(',');
           const repeatedKeys =
             repeat === 1 ? keysStr : Array.from({ length: repeat }, () => keysStr).join(',');
-          const res = await keyboardTool.execute({ keys: repeatedKeys });
+          const res = await keyboardTool.execute({
+            tabId: tab.id as number,
+            keys: repeatedKeys,
+          });
           return res;
         }
       }
@@ -1280,6 +1363,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
       case 'screenshot': {
         // Reuse existing screenshot tool; it already supports base64 save option
         const result = await screenshotTool.execute({
+          tabId: tab.id as number,
           name: 'computer',
           storeBase64: true,
           fullPage: false,

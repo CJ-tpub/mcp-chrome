@@ -485,6 +485,20 @@ export const initNativeHostListener = () => {
     void ensureNativeConnected('onStartup').catch(() => {});
   });
 
+  // Self-heal: the native host dies together with anything that kills node.exe
+  // (e.g. a harness restart). A 1-minute alarm re-establishes the port without
+  // needing the user to reload the extension.
+  try {
+    chrome.alarms.create('dsh-native-heal', { periodInMinutes: 1 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name !== 'dsh-native-heal') return;
+      if (nativePort) return;
+      void ensureNativeConnected('alarm:heal').catch(() => {});
+    });
+  } catch {
+    // alarms are best effort
+  }
+
   // Auto-connect on extension install/update
   chrome.runtime.onInstalled.addListener(() => {
     void ensureNativeConnected('onInstalled').catch(() => {});

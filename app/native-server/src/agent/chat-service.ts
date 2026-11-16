@@ -310,7 +310,7 @@ export class AgentChatService {
           }
         : projectId
           ? async (claudeSessionId: string) => {
-              await updateProjectClaudeSessionId(projectId, claudeSessionId);
+              await updateProjectClaudeSessionId(projectId as string, claudeSessionId);
             }
           : undefined,
       // Callback to persist management info from system:init message

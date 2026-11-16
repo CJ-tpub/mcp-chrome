@@ -147,7 +147,10 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
     let pageDetails: ScreenshotPageDetails | undefined;
 
     try {
-      const background = args.background === true;
+      const background =
+        args.background === undefined
+          ? !(args.fullPage || args.selector)
+          : args.background === true; // viewport captures default to background
       // CDP path: background=true with simple viewport capture (no fullPage, no selector)
       const canUseCdpCapture = background && !fullPage && !selector;
 

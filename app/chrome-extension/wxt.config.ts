@@ -47,6 +47,8 @@ export default defineConfig({
       'webRequest',
       'webNavigation',
       'debugger',
+      // Needed for chrome.tabGroups / chrome.tabs.group (control-session marking)
+      'tabGroups',
       'history',
       'bookmarks',
       'offscreen',

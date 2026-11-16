@@ -9,15 +9,38 @@ class WindowTool extends BaseBrowserToolExecutor {
       const windows = await chrome.windows.getAll({ populate: true });
       let tabCount = 0;
 
+      // Resolve tab-group titles once per window so callers can verify the
+      // "controlled tabs are grouped" affordance without extra APIs.
+      const groupTitles = new Map<number, string>();
+      for (const window of windows) {
+        const ids = new Set<number>();
+        for (const tab of window.tabs || []) {
+          if (typeof (tab as any).groupId === 'number' && (tab as any).groupId >= 0) {
+            ids.add((tab as any).groupId);
+          }
+        }
+        for (const id of ids) {
+          try {
+            const group = await chrome.tabGroups.get(id);
+            groupTitles.set(id, group.title || '');
+          } catch {
+            // ignore vanished groups
+          }
+        }
+      }
+
       const structuredWindows = windows.map((window) => {
         const tabs =
           window.tabs?.map((tab) => {
             tabCount++;
+            const groupId = typeof (tab as any).groupId === 'number' ? (tab as any).groupId : -1;
             return {
               tabId: tab.id || 0,
               url: tab.url || '',
               title: tab.title || '',
               active: tab.active || false,
+              groupId,
+              groupTitle: groupId >= 0 ? groupTitles.get(groupId) || '' : '',
             };
           }) || [];
 

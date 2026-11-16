@@ -66,11 +66,33 @@ async function listDynamicFlowTools(): Promise<Tool[]> {
   }
 }
 
+/**
+ * Curated tool surface. mcp-chrome ships ~28 tools; exposing all of them costs
+ * several thousand tokens of schema on every turn and dilutes routing. The list
+ * below is the set an agent needs to drive a real browser; the rest stay
+ * available internally (record-replay, GIF recorder, network tracing, ...).
+ */
+export const EXPOSED_TOOL_NAMES = new Set<string>([
+  'get_windows_and_tabs',
+  'chrome_navigate',
+  'chrome_screenshot',
+  'chrome_read_page',
+  'chrome_click_element',
+  'chrome_fill_or_select',
+  'chrome_keyboard',
+  'chrome_computer',
+  'chrome_get_web_content',
+  'chrome_switch_tab',
+  'chrome_close_tabs',
+  'chrome_control_session',
+]);
+
 export const setupTools = (server: Server) => {
   // List tools handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const dynamicTools = await listDynamicFlowTools();
-    return { tools: [...TOOL_SCHEMAS, ...dynamicTools] };
+    const exposed = TOOL_SCHEMAS.filter((tool) => EXPOSED_TOOL_NAMES.has(tool.name));
+    return { tools: [...exposed, ...dynamicTools] };
   });
 
   // Call tool handler

@@ -1,4 +1,5 @@
 export { navigateTool, closeTabsTool, switchTabTool } from './common';
+export { controlSessionTool } from './control-session';
 export { windowTool } from './window';
 export { vectorSearchTabsContentTool as searchTabsContentTool } from './vector-search';
 export { screenshotTool } from './screenshot';

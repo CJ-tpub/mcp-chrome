@@ -1,8 +1,108 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
+import { cdpSessionManager } from '@/utils/cdp-session-manager';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import { TOOL_MESSAGE_TYPES } from '@/common/message-types';
 import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
+
+const TOOL_MESSAGE_TIMEOUT_MS = 6000;
+
+/** Content scripts can be missing/stale (e.g. right after an extension reload) and
+ * then `chrome.tabs.sendMessage` never settles. Never let a tool hang on that. */
+function withToolTimeout<T>(promise: Promise<T>, ms = TOOL_MESSAGE_TIMEOUT_MS): Promise<T | null> {
+  return Promise.race([
+    promise.catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+async function cdpClickAt(tabId: number, selector: string): Promise<boolean> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (sel: string) => {
+        const el = document.querySelector(sel) as HTMLElement | null;
+        if (!el) return null;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      },
+      args: [selector],
+    });
+    const point = results?.[0]?.result as any;
+    if (!point) return false;
+    await cdpSessionManager.attach(tabId, 'click-fallback');
+    try {
+      await cdpSessionManager
+        .sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true })
+        .catch(() => {});
+      const base = {
+        x: Math.round(point.x),
+        y: Math.round(point.y),
+        button: 'left',
+        clickCount: 1,
+        buttons: 1,
+      };
+      await cdpSessionManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
+        ...base,
+        type: 'mouseMoved',
+        buttons: 0,
+      });
+      await cdpSessionManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
+        ...base,
+        type: 'mousePressed',
+      });
+      await cdpSessionManager.sendCommand(tabId, 'Input.dispatchMouseEvent', {
+        ...base,
+        type: 'mouseReleased',
+      });
+    } finally {
+      await cdpSessionManager.detach(tabId, 'click-fallback').catch(() => {});
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cdpFillAt(tabId: number, selector: string, value: string): Promise<boolean> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (sel: string) => {
+        const el = document.querySelector(sel) as HTMLElement | null;
+        if (!el) return null;
+        el.focus();
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) el.select();
+        return true;
+      },
+      args: [selector],
+    });
+    if (!results?.[0]?.result) return false;
+    await cdpSessionManager.attach(tabId, 'fill-fallback');
+    try {
+      await cdpSessionManager
+        .sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true })
+        .catch(() => {});
+      // Ctrl+A then insert (replaces existing content)
+      const key = { key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 };
+      await cdpSessionManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        ...key,
+      });
+      await cdpSessionManager.sendCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        ...key,
+      });
+      await cdpSessionManager.sendCommand(tabId, 'Input.insertText', { text: String(value) });
+    } finally {
+      await cdpSessionManager.detach(tabId, 'fill-fallback').catch(() => {});
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface Coordinates {
   x: number;
@@ -228,17 +328,43 @@ class FillTool extends BaseBrowserToolExecutor {
 
       await this.injectContentScript(tab.id, ['inject-scripts/fill-helper.js']);
 
-      // Send fill message to content script
-      const result = await this.sendMessageToTab(
-        tab.id,
-        {
-          action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
-          selector: finalSelector,
-          ref: finalRef,
-          value,
-        },
-        frameId,
+      // Send fill message to content script, but never hang: background tabs can
+      // throttle the injected helper so the reply never arrives.
+      const result = await withToolTimeout(
+        this.sendMessageToTab(
+          tab.id,
+          {
+            action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
+            selector: finalSelector,
+            ref: finalRef,
+            value,
+          },
+          frameId,
+        ),
       );
+
+      if (!result) {
+        if (finalSelector && (await cdpFillAt(tab.id, finalSelector, String(value)))) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  message:
+                    'Element filled via CDP fallback (content script did not answer in time)',
+                  selector: finalSelector,
+                  value,
+                }),
+              },
+            ],
+            isError: false,
+          };
+        }
+        return createErrorResponse(
+          'Fill timed out: content script did not respond and CDP fallback failed',
+        );
+      }
 
       if (result && result.error) {
         return createErrorResponse(result.error);

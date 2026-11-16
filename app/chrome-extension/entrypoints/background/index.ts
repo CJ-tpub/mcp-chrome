@@ -1,4 +1,5 @@
 import { initNativeHostListener } from './native-host';
+import { restoreControlSession } from './tools/browser/control-session';
 import {
   initSemanticSimilarityListener,
   initializeSemanticEngineIfCached,
@@ -37,6 +38,7 @@ export default defineBackground(() => {
   });
 
   // Initialize core services
+  void restoreControlSession();
   initNativeHostListener();
   initSemanticSimilarityListener();
   initStorageManagerListener();

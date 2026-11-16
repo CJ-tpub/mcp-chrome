@@ -15,6 +15,9 @@ export class NativeMessagingHost {
   private associatedServer: Server | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
 
+  /** True while the extension keeps this native port alive and the HTTP server is up. */
+  public connected = false;
+
   public setServer(serverInstance: Server): void {
     this.associatedServer = serverInstance;
   }
@@ -233,6 +236,7 @@ export class NativeMessagingHost {
       }
 
       await this.associatedServer.start(port, this);
+      this.connected = true;
 
       this.sendMessage({
         type: NativeMessageType.SERVER_STARTED,
@@ -262,6 +266,7 @@ export class NativeMessagingHost {
       }
 
       await this.associatedServer.stop();
+      this.connected = false;
       // this.serverStarted = false; // Server should update its own status after successful stop
 
       this.sendMessage({ type: NativeMessageType.SERVER_STOPPED }); // Distinguish from previous 'stopped'
@@ -308,6 +313,7 @@ export class NativeMessagingHost {
    * Clean up resources
    */
   private cleanup(): void {
+    this.connected = false;
     // Reject all pending requests
     this.pendingRequests.forEach((pending) => {
       clearTimeout(pending.timeoutId);

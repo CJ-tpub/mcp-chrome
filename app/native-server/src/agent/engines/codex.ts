@@ -222,7 +222,7 @@ export class CodexEngine implements AgentEngine {
         // Close readline interface
         if (rl) {
           try {
-            rl.close();
+            rl?.close();
           } catch {
             // Ignore close errors during cleanup
           }
@@ -547,7 +547,7 @@ export class CodexEngine implements AgentEngine {
         timedOut = true;
         // Close readline to exit the loop
         try {
-          rl.close();
+          rl?.close();
         } catch {
           // Ignore
         }

@@ -1,0 +1,267 @@
+import { TOOL_NAMES } from 'chrome-mcp-shared';
+import { createErrorResponse, ToolResult } from '@/common/tool-handler';
+import { cdpSessionManager } from '@/utils/cdp-session-manager';
+import { installCursor, setFaviconBadge, hideCursor } from '@/utils/page-overlay';
+
+/**
+ * Control session: a session-scoped layer over mcp-chrome's per-call CDP usage.
+ *
+ * Goals (parity with desktop assistants that drive the user's real browser):
+ *  1. keep ONE debugger attachment alive per touched tab, so the browser shows a
+ *     single steady "is debugging this browser" bar instead of a flicker per call;
+ *  2. mark controlled tabs (tab group + action badge + favicon badge);
+ *  3. give the page a visible cursor overlay while acting;
+ *  4. never bring the tab or its window to the foreground.
+ */
+
+export const CONTROL_SESSION_OWNER = 'control-session';
+const STATE_KEY = 'dsh.controlSession';
+
+export interface ControlSessionPolicy {
+  background: boolean;
+  group: boolean;
+  cursor: boolean;
+  favicon: boolean;
+}
+
+export interface ControlSessionState {
+  sessionId: string;
+  label: string;
+  startedAt: number;
+  tabIds: number[];
+  policy: ControlSessionPolicy;
+}
+
+let current: ControlSessionState | null = null;
+const pinned = new Set<number>();
+const groupByWindow = new Map<number, number>();
+
+function ok(data: unknown): ToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(data) }], isError: false };
+}
+
+function normalizePolicy(partial?: Partial<ControlSessionPolicy>): ControlSessionPolicy {
+  return {
+    background: partial?.background ?? true,
+    group: partial?.group ?? true,
+    cursor: partial?.cursor ?? true,
+    favicon: partial?.favicon ?? true,
+  };
+}
+
+export function getControlSession(): ControlSessionState | null {
+  return current;
+}
+
+export function isControlSessionActive(): boolean {
+  return current !== null;
+}
+
+async function persist(): Promise<void> {
+  try {
+    const storage = chrome.storage.session;
+    if (!storage) return;
+    if (current) await storage.set({ [STATE_KEY]: current });
+    else await storage.remove(STATE_KEY);
+  } catch {
+    // best effort
+  }
+}
+
+async function ensureGrouped(tabId: number, label: string): Promise<void> {
+  if (!current?.policy.group) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const windowId = tab.windowId;
+    let groupId = groupByWindow.get(windowId);
+    if (groupId === undefined) {
+      groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } });
+      groupByWindow.set(windowId, groupId);
+      await chrome.tabGroups.update(groupId, {
+        title: 'DSH · ' + label,
+        color: 'blue',
+        collapsed: false,
+      });
+    } else {
+      await chrome.tabs.group({ tabIds: [tabId], groupId });
+    }
+  } catch (error) {
+    console.warn('[control-session] tab group failed', error);
+  }
+}
+
+async function ensureMarked(tabId: number): Promise<void> {
+  try {
+    await chrome.action.setBadgeText({ tabId, text: 'AI' });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: '#1d4ed8' });
+  } catch {
+    // action API unavailable on some channels
+  }
+  if (current?.policy.favicon) await setFaviconBadge(tabId, true);
+  if (current?.policy.cursor) await installCursor(tabId);
+}
+
+async function unmark(tabId: number): Promise<void> {
+  try {
+    await chrome.action.setBadgeText({ tabId, text: '' });
+  } catch {
+    // ignore
+  }
+  await setFaviconBadge(tabId, false);
+  await hideCursor(tabId);
+  try {
+    await chrome.tabs.ungroup(tabId);
+  } catch {
+    // tab may be gone or never grouped
+  }
+}
+
+/** Pin a tab to the active control session (idempotent). */
+export async function ensurePinned(tabId: number): Promise<boolean> {
+  if (!current) return false;
+  if (pinned.has(tabId)) return cdpSessionManager.isAttached(tabId);
+  try {
+    await cdpSessionManager.attach(tabId, CONTROL_SESSION_OWNER);
+    pinned.add(tabId);
+    if (!current.tabIds.includes(tabId)) {
+      current.tabIds.push(tabId);
+      void persist();
+    }
+    await ensureGrouped(tabId, current.label);
+    await ensureMarked(tabId);
+    return true;
+  } catch (error) {
+    console.warn('[control-session] failed to pin tab', tabId, error);
+    return false;
+  }
+}
+
+export async function beginControlSession(
+  options: {
+    label?: string;
+    tabIds?: number[];
+    policy?: Partial<ControlSessionPolicy>;
+  } = {},
+): Promise<ControlSessionState> {
+  if (!current) {
+    current = {
+      sessionId: 'dsh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+      label: options.label || 'DSH',
+      startedAt: Date.now(),
+      tabIds: [],
+      policy: normalizePolicy(options.policy),
+    };
+    await persist();
+  }
+  for (const tabId of options.tabIds || []) await ensurePinned(tabId);
+  return current;
+}
+
+export async function endControlSession(): Promise<ControlSessionState | null> {
+  const previous = current;
+  current = null;
+  const tabs = [...pinned];
+  pinned.clear();
+  groupByWindow.clear();
+  for (const tabId of tabs) {
+    try {
+      await cdpSessionManager.detach(tabId, CONTROL_SESSION_OWNER);
+    } catch {
+      // best effort
+    }
+    await unmark(tabId);
+  }
+  await persist();
+  return previous;
+}
+
+/** Re-attach pinned tabs after a service-worker restart. */
+export async function restoreControlSession(): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(STATE_KEY);
+    const state = stored?.[STATE_KEY] as ControlSessionState | undefined;
+    if (!state) return;
+    current = state;
+    pinned.clear();
+    for (const tabId of state.tabIds || []) await ensurePinned(tabId);
+  } catch {
+    // ignore
+  }
+}
+
+// Auto-pin every tab the AI touches while a session is active.
+cdpSessionManager.setPinHook((tabId) => {
+  void ensurePinned(tabId);
+});
+
+try {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (!pinned.delete(tabId)) return;
+    if (current) {
+      current.tabIds = current.tabIds.filter((id) => id !== tabId);
+      void persist();
+    }
+  });
+} catch {
+  // ignore
+}
+
+class ControlSessionTool {
+  name = TOOL_NAMES.BROWSER.CONTROL_SESSION;
+
+  async execute(args: any = {}): Promise<ToolResult> {
+    const action = String(args?.action || 'status');
+    try {
+      if (action === 'begin') {
+        const state = await beginControlSession({
+          label: typeof args?.label === 'string' ? args.label : undefined,
+          tabIds: Array.isArray(args?.tabIds)
+            ? args.tabIds.filter((n: any) => typeof n === 'number')
+            : undefined,
+          policy: args?.policy && typeof args.policy === 'object' ? args.policy : undefined,
+        });
+        return ok({
+          ok: true,
+          action,
+          session: state,
+          pinnedTabs: [...pinned],
+          attachedTabs: cdpSessionManager.attachedTabIds(),
+        });
+      }
+
+      if (action === 'end') {
+        const previous = await endControlSession();
+        return ok({
+          ok: true,
+          action,
+          ended: previous,
+          attachedTabs: cdpSessionManager.attachedTabIds(),
+        });
+      }
+
+      let debuggerTargets: number[] = [];
+      try {
+        const targets = await chrome.debugger.getTargets();
+        debuggerTargets = targets
+          .filter((t) => t.attached && typeof t.tabId === 'number')
+          .map((t) => t.tabId as number);
+      } catch {
+        // debugger API unavailable
+      }
+      return ok({
+        ok: true,
+        action: 'status',
+        session: current,
+        pinnedTabs: [...pinned],
+        attachedTabs: cdpSessionManager.attachedTabIds(),
+        debuggerTargets,
+      });
+    } catch (error) {
+      return createErrorResponse(
+        'control_session failed: ' + (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+}
+
+export const controlSessionTool = new ControlSessionTool();

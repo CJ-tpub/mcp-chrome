@@ -13,6 +13,39 @@ const DEBUGGER_PROTOCOL_VERSION = '1.3';
 class CDPSessionManager {
   private sessions = new Map<number, TabSessionState>();
 
+  /**
+   * Invoked after a NEW attach for a non-pin owner. A control session uses this to
+   * pin the tab (keep the debugger attached for the whole session) so callers that
+   * attach/detach per tool call no longer make the browser's debug bar flicker.
+   */
+  private pinHook: ((tabId: number) => void) | null = null;
+
+  setPinHook(hook: ((tabId: number) => void) | null): void {
+    this.pinHook = hook;
+  }
+
+  isAttached(tabId: number): boolean {
+    const state = this.sessions.get(tabId);
+    return !!state && state.attachedByUs && state.refCount > 0;
+  }
+
+  attachedTabIds(): number[] {
+    return [...this.sessions.entries()]
+      .filter(([, state]) => state.attachedByUs && state.refCount > 0)
+      .map(([tabId]) => tabId);
+  }
+
+  /** Release a single owner from every tab that still holds it. */
+  async releaseOwner(owner: OwnerTag): Promise<number[]> {
+    const released: number[] = [];
+    for (const [tabId, state] of [...this.sessions.entries()]) {
+      if (!state.owners.has(owner)) continue;
+      await this.detach(tabId, owner);
+      released.push(tabId);
+    }
+    return released;
+  }
+
   private getState(tabId: number): TabSessionState | undefined {
     return this.sessions.get(tabId);
   }
@@ -40,6 +73,7 @@ class CDPSessionManager {
           owners: new Set([...(state?.owners || []), owner]),
           attachedByUs: true,
         });
+        if (owner !== 'control-session') this.pinHook?.(tabId);
         return;
       }
       // Another client (DevTools/other extension) is attached
@@ -51,6 +85,7 @@ class CDPSessionManager {
     // Attach freshly
     await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
     this.setState(tabId, { refCount: 1, owners: new Set([owner]), attachedByUs: true });
+    if (owner !== 'control-session') this.pinHook?.(tabId);
   }
 
   async detach(tabId: number, owner: OwnerTag = 'unknown'): Promise<void> {

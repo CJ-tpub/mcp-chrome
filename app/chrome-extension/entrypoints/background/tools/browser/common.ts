@@ -46,7 +46,9 @@ class NavigateTool extends BaseBrowserToolExecutor {
       url,
       refresh = false,
       tabId,
-      background,
+      // Background-first: navigation used to activate the tab and focus the window,
+      // which yanked the user's foreground away. Opt in with background:false.
+      background = true,
       windowId,
     } = args;
 
@@ -155,20 +157,31 @@ class NavigateTool extends BaseBrowserToolExecutor {
             const pathWildcard = '/*';
 
             const hostNoWww = u.host.replace(/^www\./, '');
-            const hostWithWww = hostNoWww.startsWith('www.') ? hostNoWww : `www.${hostNoWww}`;
+            // Chrome match patterns reject a www. prefix on IPs / localhost / IPv6,
+            // so only synthesize the www variant for real DNS hostnames.
+            const isIpOrLocal =
+              /^(\d{1,3}\.){3}\d{1,3}$/.test(u.hostname) ||
+              u.hostname === 'localhost' ||
+              u.hostname.startsWith('[') ||
+              u.hostname.includes(':');
+            const hostWithWww = isIpOrLocal
+              ? null
+              : hostNoWww.startsWith('www.')
+                ? hostNoWww
+                : `www.${hostNoWww}`;
 
             // Keep original host
             patterns.add(`${u.protocol}//${u.host}${pathWildcard}`);
             // Add no-www variant
             patterns.add(`${u.protocol}//${hostNoWww}${pathWildcard}`);
-            // Add www variant
-            patterns.add(`${u.protocol}//${hostWithWww}${pathWildcard}`);
+            // Add www variant (hostnames only)
+            if (hostWithWww) patterns.add(`${u.protocol}//${hostWithWww}${pathWildcard}`);
 
             // Add protocol variant to catch http↔https redirects
             const altProtocol = u.protocol === 'https:' ? 'http:' : 'https:';
             patterns.add(`${altProtocol}//${u.host}${pathWildcard}`);
             patterns.add(`${altProtocol}//${hostNoWww}${pathWildcard}`);
-            patterns.add(`${altProtocol}//${hostWithWww}${pathWildcard}`);
+            if (hostWithWww) patterns.add(`${altProtocol}//${hostWithWww}${pathWildcard}`);
           } else {
             patterns.add(input);
           }
@@ -640,10 +653,15 @@ class SwitchTabTool extends BaseBrowserToolExecutor {
     console.log(`Attempting to switch to tab ID: ${tabId} in window ID: ${windowId}`);
 
     try {
-      if (windowId !== undefined) {
+      // Background-first: activating the tab / focusing the window is now opt-in.
+      const activate = args?.activate === true;
+      const focusWindow = args?.focusWindow === true;
+      if (focusWindow && windowId !== undefined) {
         await chrome.windows.update(windowId, { focused: true });
       }
-      await chrome.tabs.update(tabId, { active: true });
+      if (activate) {
+        await chrome.tabs.update(tabId, { active: true });
+      }
 
       const updatedTab = await chrome.tabs.get(tabId);
 

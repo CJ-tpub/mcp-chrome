@@ -39,6 +39,7 @@ export const TOOL_NAMES = {
     PERFORMANCE_STOP_TRACE: 'performance_stop_trace',
     PERFORMANCE_ANALYZE_INSIGHT: 'performance_analyze_insight',
     GIF_RECORDER: 'chrome_gif_recorder',
+    CONTROL_SESSION: 'chrome_control_session',
   },
   RECORD_REPLAY: {
     FLOW_RUN: 'record_replay_flow_run',
@@ -54,6 +55,44 @@ export const TOOL_SCHEMAS: Tool[] = [
       type: 'object',
       properties: {},
       required: [],
+    },
+  },
+  {
+    name: TOOL_NAMES.BROWSER.CONTROL_SESSION,
+    description:
+      'Begin, end, or inspect a background control session on the user\'s real browser. While a session is active the extension keeps the debugger attached to every tab it touches (the browser shows ONE persistent \'is debugging this browser\' bar instead of a flicker per tool call) and tracks those tabs. Call action="begin" once before a multi-step task, then action="end" when finished.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['begin', 'end', 'status'],
+          description:
+            'begin starts (or keeps) a session; end releases the debugger and clears state; status reports the current session.',
+        },
+        label: {
+          type: 'string',
+          description:
+            'Short human readable label for this session (used for the tab group title).',
+        },
+        tabIds: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'Optional tab ids to pin immediately; further tabs are pinned automatically as they are touched.',
+        },
+        policy: {
+          type: 'object',
+          description: 'Session behaviour switches (defaults: all true).',
+          properties: {
+            background: { type: 'boolean' },
+            group: { type: 'boolean' },
+            cursor: { type: 'boolean' },
+            favicon: { type: 'boolean' },
+          },
+        },
+      },
+      required: ['action'],
     },
   },
   // {
