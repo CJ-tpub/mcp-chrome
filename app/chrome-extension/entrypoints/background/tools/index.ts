@@ -146,7 +146,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
   try {
     const sessionId = (param as any).sessionId || '';
     setActiveOwner(sessionId);
-    touchActivity();
+    touchActivity(sessionId);
 
     const owner = getSessionOwner();
     const readonly = READONLY_TOOLS.has(param.name);

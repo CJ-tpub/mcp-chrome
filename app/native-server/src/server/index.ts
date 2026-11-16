@@ -321,11 +321,9 @@ export class Server {
       if (sessionId) {
         const session = this.sessions.get(sessionId);
         if (!session) {
-          reply.code(HTTP_STATUS.NOT_FOUND).send({
-            jsonrpc: '2.0',
-            error: { code: -32001, message: 'MCP session not found; re-initialize' },
-            id: null,
-          });
+          // Per MCP spec: an unknown session is a bare HTTP 404 so the client
+          // re-initializes instead of surfacing a JSON-RPC error and going dead.
+          reply.code(HTTP_STATUS.NOT_FOUND).send();
           return;
         }
         session.lastSeen = Date.now();

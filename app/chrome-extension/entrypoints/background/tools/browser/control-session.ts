@@ -65,7 +65,10 @@ export function setActiveOwner(owner: string): void {
   activeOwner = owner || '';
 }
 
-export function touchActivity(): void {
+export function touchActivity(owner?: string): void {
+  // Only the owning session refreshes the lease; otherwise a bystander session
+  // could keep a dead owner's claim alive forever.
+  if (owner && current && current.owner && owner !== current.owner) return;
   lastActivityAt = Date.now();
 }
 
@@ -241,6 +244,16 @@ export async function restoreControlSession(): Promise<void> {
     pinned.clear();
     // A suspension survives the SW restart: never silently re-attach.
     if (suspendedOwner && suspendedOwner === state.owner) return;
+    // chrome.debugger keeps attachments across a service-worker restart while
+    // our in-memory bookkeeping does not. Drop the orphans first so the
+    // ref-counted manager starts from a clean, truthful state.
+    for (const tabId of state.tabIds || []) {
+      try {
+        await chrome.debugger.detach({ tabId });
+      } catch {
+        // not attached: fine
+      }
+    }
     for (const tabId of state.tabIds || []) await ensurePinned(tabId);
   } catch {
     // ignore
