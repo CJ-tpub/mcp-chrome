@@ -4,6 +4,7 @@ import { NATIVE_HOST, STORAGE_KEYS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '@/c
 import { handleCallTool } from './tools';
 import { listPublished, getFlow } from './record-replay/flow-store';
 import { acquireKeepalive } from './keepalive-manager';
+import { getSessionOwner, endControlSession } from './tools/browser/control-session';
 
 const LOG_PREFIX = '[NativeHost]';
 
@@ -344,6 +345,16 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
     nativePort = chrome.runtime.connectNative(HOST_NAME);
 
     nativePort.onMessage.addListener(async (message) => {
+      // The host tells us when an MCP client is gone so we can release the
+      // browser resources it still owned (debugger, group, badge, favicon).
+      if (message.type === 'control_session_release') {
+        const owner = message.payload && message.payload.owner;
+        if (owner && getSessionOwner() === owner) {
+          await endControlSession(true).catch(() => {});
+        }
+        return;
+      }
+
       if (message.type === NativeMessageType.PROCESS_DATA && message.requestId) {
         const requestId = message.requestId;
         const requestPayload = message.payload;

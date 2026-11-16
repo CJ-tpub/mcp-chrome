@@ -429,6 +429,16 @@ export class Server {
     session: { transport: StreamableHTTPServerTransport; server: McpServerType; lastSeen: number },
   ): Promise<void> {
     this.sessions.delete(sessionId);
+    // Let the extension release any browser resources this session still owns,
+    // otherwise a crashed/closed client would keep control until the lease.
+    try {
+      this.nativeHost?.sendMessage({
+        type: 'control_session_release',
+        payload: { owner: sessionId },
+      });
+    } catch {
+      // best effort
+    }
     try {
       await session.transport.close();
     } catch {

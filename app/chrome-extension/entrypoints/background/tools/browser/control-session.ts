@@ -175,9 +175,14 @@ export async function beginControlSession(
   } = {},
 ): Promise<ControlSessionState> {
   if (current && current.owner && activeOwner && current.owner !== activeOwner) {
-    throw new Error(
-      'E_SESSION_BUSY: another agent session (' + current.owner + ') owns the browser control session',
-    );
+    const idleMs = lastActivityAt ? Date.now() - lastActivityAt : Number.MAX_SAFE_INTEGER;
+    if (idleMs < 120000) {
+      throw new Error(
+        'E_SESSION_BUSY: another agent session (' + current.owner + ') owns the browser control session',
+      );
+    }
+    // Owner vanished (crash / host restart): reclaim after 2 quiet minutes.
+    await endControlSession(true);
   }
   if (suspendedOwner === activeOwner) {
     suspendedOwner = '';
