@@ -77,8 +77,10 @@ export function getSessionOwner(): string {
 }
 
 /** True when the user canceled debugging for this owner and we must not act. */
-export function isSuspendedFor(owner: string): boolean {
-  return !!owner && suspendedOwner === owner;
+export function isSuspendedFor(_owner: string): boolean {
+  // Suspension is global: after a user cancel nobody may act until a begin
+  // clears it, otherwise a fresh MCP session id would bypass the cancel.
+  return !!suspendedOwner;
 }
 
 export function getSuspensionOwner(): string {

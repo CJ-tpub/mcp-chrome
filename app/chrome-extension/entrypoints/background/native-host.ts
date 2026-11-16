@@ -450,6 +450,9 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
 
     nativePort.onDisconnect.addListener(() => {
       console.warn(ERROR_MESSAGES.NATIVE_DISCONNECTED, chrome.runtime.lastError);
+      // The host process is gone: release the browser resources it drove so a
+      // zombie owner cannot block the next session.
+      void endControlSession(true).catch(() => {});
       nativePort = null;
 
       // Mark server as stopped since native host disconnection means server is down

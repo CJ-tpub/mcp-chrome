@@ -105,11 +105,9 @@ export class Server {
     // Extension communication
     this.setupExtensionRoutes();
 
-    // Agent routes (delegated to separate module)
-    registerAgentRoutes(this.fastify, {
-      streamManager: this.agentStreamManager,
-      chatService: this.agentChatService,
-    });
+    // Agent routes are intentionally NOT registered: they could spawn a coding
+    // agent with sandbox bypass and must never be reachable from a plain HTTP
+    // call. DSH talks to the extension through MCP only.
 
     // MCP routes
     this.setupMcpRoutes();
@@ -159,6 +157,8 @@ export class Server {
   // ============================================================
 
   private setupExtensionRoutes(): void {
+    // /ask-extension would proxy arbitrary requests into the browser; disabled.
+    return;
     this.fastify.get(
       '/ask-extension',
       async (request: FastifyRequest<{ Body: ExtensionRequestPayload }>, reply: FastifyReply) => {
@@ -254,12 +254,15 @@ export class Server {
   private setupMcpRoutes(): void {
     // Loopback-only guard: reject non-local Host headers (DNS rebinding) and
     // any browser-originated request (extension pages never send Origin here).
+    // Global guard: loopback Host only, no browser Origin, and a bearer token
+    // for everything except the two read-only probes. This closes every route
+    // (including any future one) rather than only /mcp.
     this.fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
       const url = request.raw.url || '';
-      if (!/^\/(mcp|sse|messages)(?:$|[/?])/.test(url)) return;
       const hostHeader = String(request.headers.host || '');
       const host = hostHeader.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-      if (host && !['127.0.0.1', 'localhost', '::1'].includes(host)) {
+      const loopback = host === '127.0.0.1' || host === '::1' || host === 'localhost';
+      if (!loopback) {
         reply.code(HTTP_STATUS.FORBIDDEN).send({ error: 'forbidden host' });
         return;
       }
@@ -267,6 +270,7 @@ export class Server {
         reply.code(HTTP_STATUS.FORBIDDEN).send({ error: 'origin not allowed' });
         return;
       }
+      if (/^\/(health|ping)(?:$|[/?])/.test(url)) return;
       if (!this.isAuthorized(request)) {
         reply.code(401).send({ error: 'unauthorized: bearer token required' });
         return;

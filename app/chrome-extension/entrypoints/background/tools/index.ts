@@ -146,7 +146,6 @@ export const handleCallTool = async (param: ToolCallParam) => {
   try {
     const sessionId = (param as any).sessionId || '';
     setActiveOwner(sessionId);
-    touchActivity(sessionId);
 
     const owner = getSessionOwner();
     const readonly = READONLY_TOOLS.has(param.name);
@@ -156,7 +155,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
         'E_SESSION_NOT_OWNER: browser control is owned by another agent session (' + owner + ').',
       );
     }
-    // The user canceled debugging for this owner: refuse until they act again.
+    // The user canceled debugging: hold every session until someone begins again.
     if (!readonly && isSuspendedFor(sessionId)) {
       return createErrorResponse(
         'E_SESSION_SUSPENDED: the user canceled browser debugging. Ask the user to re-approve, then call control_session begin again.',
@@ -165,6 +164,10 @@ export const handleCallTool = async (param: ToolCallParam) => {
 
     const blocked = await guardWritePolicy(param.name, param.args);
     if (blocked) return createErrorResponse(blocked);
+
+    // Only a valid, non-suspended owner refreshes the lease; rejected calls must
+    // not keep a vanished owner's claim alive.
+    touchActivity(sessionId);
 
     const tabId = param.args && param.args.tabId;
     const run = () => tool.execute(param.args);
