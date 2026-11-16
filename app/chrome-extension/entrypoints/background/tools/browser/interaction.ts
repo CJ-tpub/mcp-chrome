@@ -198,8 +198,9 @@ class ClickTool extends BaseBrowserToolExecutor {
 
       await this.injectContentScript(tab.id, ['inject-scripts/click-helper.js']);
 
-      // Send click message to content script
-      const result = await this.sendMessageToTab(
+      // Send click message to content script (bounded: a background tab may never answer)
+      const result = await withToolTimeout(
+        this.sendMessageToTab(
         tab.id,
         {
           action: TOOL_MESSAGE_TYPES.CLICK_ELEMENT,
@@ -214,8 +215,36 @@ class ClickTool extends BaseBrowserToolExecutor {
           cancelable,
           modifiers,
         },
-        frameId,
+          frameId,
+        ),
       );
+
+      if (!result) {
+        return createErrorResponse(
+          'E_UNCERTAIN: the page never answered the click (background tab may be throttled). ' +
+            'No retry was attempted to avoid a double action. Verify the page state before retrying.',
+        );
+      }
+
+      if (result.error && /not found/i.test(String(result.error))) {
+        // Definitive "element missing" means nothing was clicked yet: CDP is safe.
+        if (finalSelector && (await cdpClickAt(tab.id, finalSelector))) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  message: 'Element clicked via CDP fallback (DOM helper could not resolve it)',
+                  selector: finalSelector,
+                  method: 'cdp-fallback',
+                }),
+              },
+            ],
+            isError: false,
+          };
+        }
+      }
 
       // Determine actual click method used
       let clickMethod: string;
@@ -344,25 +373,9 @@ class FillTool extends BaseBrowserToolExecutor {
       );
 
       if (!result) {
-        if (finalSelector && (await cdpFillAt(tab.id, finalSelector, String(value)))) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({
-                  success: true,
-                  message:
-                    'Element filled via CDP fallback (content script did not answer in time)',
-                  selector: finalSelector,
-                  value,
-                }),
-              },
-            ],
-            isError: false,
-          };
-        }
         return createErrorResponse(
-          'Fill timed out: content script did not respond and CDP fallback failed',
+          'E_UNCERTAIN: the page never answered the fill request (background tab may be throttled). ' +
+            'No retry was attempted to avoid duplicating text. Verify the field value before retrying.',
         );
       }
 

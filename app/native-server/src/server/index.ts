@@ -20,7 +20,10 @@ import {
 import { NativeMessagingHost } from '../native-messaging-host';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createMcpServer } from '../mcp/mcp-server';
 import type { Server as McpServerType } from '@modelcontextprotocol/sdk/server/index.js';
@@ -53,6 +56,9 @@ export class Server {
   > = new Map();
   private sseTransports: Map<string, SSEServerTransport> = new Map();
   private reaperTimer: NodeJS.Timeout | null = null;
+  /** Random per-machine bearer token; the MCP endpoint refuses requests without it. */
+  private authToken = '';
+  private authTokenPath = '';
   private agentStreamManager: AgentStreamManager;
   private agentChatService: AgentChatService;
 
@@ -124,6 +130,8 @@ export class Server {
     this.fastify.get('/health', async (_request: FastifyRequest, reply: FastifyReply) => {
       reply.status(HTTP_STATUS.OK).send({
         status: 'ok',
+        app: 'dsh-edge-mcp',
+        auth: this.authTokenPath ? 'token-file' : 'pending',
         extensionConnected: this.nativeHost?.connected ?? false,
         running: this.isRunning,
         sessions: this.sessions.size,
@@ -180,6 +188,44 @@ export class Server {
   // MCP Routes
   // ============================================================
 
+  /** Load or create the loopback bearer token (user-scoped file, 32 hex bytes). */
+  private ensureAuthToken(): string {
+    if (this.authToken) return this.authToken;
+    const dir = join(process.env.LOCALAPPDATA || homedir(), 'dsh-edge-mcp');
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      // ignore
+    }
+    const tokenPath = join(dir, 'token.txt');
+    this.authTokenPath = tokenPath;
+    try {
+      if (existsSync(tokenPath)) {
+        const existing = readFileSync(tokenPath, 'utf8').trim();
+        if (existing.length >= 16) {
+          this.authToken = existing;
+          return existing;
+        }
+      }
+      const fresh = randomBytes(32).toString('hex');
+      writeFileSync(tokenPath, fresh, { encoding: 'utf8', mode: 0o600 });
+      this.authToken = fresh;
+      return fresh;
+    } catch {
+      // Last resort: in-memory token (clients cannot read it, so auth fails closed)
+      this.authToken = randomBytes(32).toString('hex');
+      return this.authToken;
+    }
+  }
+
+  private isAuthorized(request: FastifyRequest): boolean {
+    if (process.env.DSH_EDGE_NO_AUTH === '1') return true;
+    const token = this.ensureAuthToken();
+    const header = String(request.headers.authorization || '');
+    if (!header.startsWith('Bearer ')) return false;
+    return header.slice(7).trim() === token;
+  }
+
   private setupMcpRoutes(): void {
     // Loopback-only guard: reject non-local Host headers (DNS rebinding) and
     // any browser-originated request (extension pages never send Origin here).
@@ -194,6 +240,10 @@ export class Server {
       }
       if (request.headers.origin) {
         reply.code(HTTP_STATUS.FORBIDDEN).send({ error: 'origin not allowed' });
+        return;
+      }
+      if (!this.isAuthorized(request)) {
+        reply.code(401).send({ error: 'unauthorized: bearer token required' });
         return;
       }
     });
@@ -272,10 +322,14 @@ export class Server {
       }
 
       const newSessionId = randomUUID();
-      const server = createMcpServer();
+      // The MCP SDK assigns the session id during handleRequest; expose it lazily
+      // so tool calls can carry their owning session.
+      const holder: { id: string } = { id: '' };
+      const server = createMcpServer(() => holder.id);
       const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => newSessionId,
         onsessioninitialized: (initializedSessionId: string) => {
+          holder.id = initializedSessionId;
           this.sessions.set(initializedSessionId, { transport, server, lastSeen: Date.now() });
         },
       });
@@ -402,8 +456,25 @@ export class Server {
         }, MCP_REAP_INTERVAL_MS);
         this.reaperTimer.unref?.();
       }
-    } catch (err) {
+    } catch (err: any) {
       this.isRunning = false;
+      if (err && err.code === 'EADDRINUSE') {
+        // Another browser profile (or a stale host) already owns the port. If it
+        // is one of ours, stay alive quietly: the extension will route through it.
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          try {
+            const res = await fetch('http://127.0.0.1:' + port + '/health');
+            const body: any = await res.json();
+            if (body && body.app === 'dsh-edge-mcp') {
+              console.warn('[mcp] port ' + port + ' already served by another dsh-edge-mcp host; standing by');
+              return;
+            }
+          } catch {
+            // port holder not answering yet; retry
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
       throw err;
     }
   }

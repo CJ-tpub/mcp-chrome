@@ -26,6 +26,8 @@ export interface ControlSessionPolicy {
 
 export interface ControlSessionState {
   sessionId: string;
+  /** MCP session that owns this control session. */
+  owner: string;
   label: string;
   startedAt: number;
   tabIds: number[];
@@ -34,6 +36,11 @@ export interface ControlSessionState {
 
 let current: ControlSessionState | null = null;
 const pinned = new Set<number>();
+/** MCP session id currently driving this extension (set by the tool dispatcher). */
+let activeOwner = '';
+/** Set after the user cancels the debug bar; blocks silent auto re-attach. */
+let suspendedOwner = '';
+let lastActivityAt = 0;
 const groupByWindow = new Map<number, number>();
 
 function ok(data: unknown): ToolResult {
@@ -51,6 +58,14 @@ function normalizePolicy(partial?: Partial<ControlSessionPolicy>): ControlSessio
 
 export function getControlSession(): ControlSessionState | null {
   return current;
+}
+
+export function setActiveOwner(owner: string): void {
+  activeOwner = owner || '';
+}
+
+export function touchActivity(): void {
+  lastActivityAt = Date.now();
 }
 
 export function isControlSessionActive(): boolean {
@@ -119,7 +134,9 @@ async function unmark(tabId: number): Promise<void> {
 /** Pin a tab to the active control session (idempotent). */
 export async function ensurePinned(tabId: number): Promise<boolean> {
   if (!current) return false;
+  if (suspendedOwner && suspendedOwner === current.owner) return false;
   if (pinned.has(tabId)) return cdpSessionManager.isAttached(tabId);
+  lastActivityAt = Date.now();
   try {
     await cdpSessionManager.attach(tabId, CONTROL_SESSION_OWNER);
     pinned.add(tabId);
@@ -143,22 +160,33 @@ export async function beginControlSession(
     policy?: Partial<ControlSessionPolicy>;
   } = {},
 ): Promise<ControlSessionState> {
+  if (current && current.owner && activeOwner && current.owner !== activeOwner) {
+    throw new Error(
+      'E_SESSION_BUSY: another agent session (' + current.owner + ') owns the browser control session',
+    );
+  }
   if (!current) {
+    suspendedOwner = '';
     current = {
       sessionId: 'dsh-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+      owner: activeOwner,
       label: options.label || 'DSH',
       startedAt: Date.now(),
       tabIds: [],
       policy: normalizePolicy(options.policy),
     };
+    lastActivityAt = Date.now();
     await persist();
   }
   for (const tabId of options.tabIds || []) await ensurePinned(tabId);
   return current;
 }
 
-export async function endControlSession(): Promise<ControlSessionState | null> {
+export async function endControlSession(force = false): Promise<ControlSessionState | null> {
   const previous = current;
+  if (!force && previous && previous.owner && activeOwner && previous.owner !== activeOwner) {
+    throw new Error('E_SESSION_BUSY: only the owning session may end the control session');
+  }
   current = null;
   const tabs = [...pinned];
   pinned.clear();
@@ -187,6 +215,35 @@ export async function restoreControlSession(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+// Respect an explicit user cancel: end the session and stop auto re-attaching.
+try {
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    if (reason !== 'canceled_by_user') return;
+    if (!current) return;
+    if (typeof source.tabId !== 'number') return;
+    suspendedOwner = current.owner;
+    void endControlSession(true).catch(() => {});
+    console.warn('[control-session] user canceled debugging; session suspended');
+  });
+} catch {
+  // listener registration is best effort
+}
+
+// Lease: if the agent disappears (crash, harness restart, idle), clean up.
+const LEASE_IDLE_MS = 10 * 60 * 1000;
+try {
+  chrome.alarms.create('dsh-session-lease', { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== 'dsh-session-lease') return;
+    if (!current) return;
+    if (lastActivityAt && Date.now() - lastActivityAt < LEASE_IDLE_MS) return;
+    console.warn('[control-session] lease expired; releasing browser resources');
+    void endControlSession(true).catch(() => {});
+  });
+} catch {
+  // alarms are best effort
 }
 
 // Auto-pin every tab the AI touches while a session is active.

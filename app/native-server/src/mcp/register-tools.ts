@@ -87,7 +87,7 @@ export const EXPOSED_TOOL_NAMES = new Set<string>([
   'chrome_control_session',
 ]);
 
-export const setupTools = (server: Server) => {
+export const setupTools = (server: Server, getSessionId?: () => string) => {
   // List tools handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const dynamicTools = await listDynamicFlowTools();
@@ -97,11 +97,15 @@ export const setupTools = (server: Server) => {
 
   // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
-    handleToolCall(request.params.name, request.params.arguments || {}),
+    handleToolCall(request.params.name, request.params.arguments || {}, getSessionId?.()),
   );
 };
 
-const handleToolCall = async (name: string, args: any): Promise<CallToolResult> => {
+const handleToolCall = async (
+  name: string,
+  args: any,
+  sessionId?: string,
+): Promise<CallToolResult> => {
   try {
     // If calling a dynamic flow tool (name starts with flow.), proxy to common flow-run tool
     if (name && name.startsWith('flow.')) {
@@ -144,6 +148,8 @@ const handleToolCall = async (name: string, args: any): Promise<CallToolResult> 
       {
         name,
         args,
+        // The extension keys control-session ownership by this id.
+        sessionId: sessionId || '',
       },
       NativeMessageType.CALL_TOOL,
       120000, // 延长到 120 秒，避免性能分析等长任务超时

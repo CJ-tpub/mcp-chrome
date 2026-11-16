@@ -10,7 +10,7 @@ import { setupTools } from './register-tools';
  * "Already connected to a transport" and could only be cleared by killing
  * the native host).
  */
-export function createMcpServer(): Server {
+export function createMcpServer(getSessionId?: () => string): Server {
   const server = new Server(
     {
       name: 'ChromeMcpServer',
@@ -23,7 +23,7 @@ export function createMcpServer(): Server {
     },
   );
 
-  setupTools(server);
+  setupTools(server, getSessionId);
   return server;
 }
 

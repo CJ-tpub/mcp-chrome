@@ -571,6 +571,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
         // Prefer DOM path via existing click tool
         // Prefer a real CDP input event (isTrusted=true, triggers the cursor
         // overlay) and fall back to the DOM click helper only if CDP fails.
+        let cdpSent = false;
         try {
           const button = params.action === 'right_click' ? 'right' : 'left';
           await CDPHelper.attach(tab.id);
@@ -581,6 +582,7 @@ class ComputerTool extends BaseBrowserToolExecutor {
               y: coord.y,
               buttons: 0,
             });
+            cdpSent = true;
             await CDPHelper.dispatchMouseEvent(tab.id, {
               type: 'mousePressed',
               x: coord.x,
@@ -618,7 +620,13 @@ class ComputerTool extends BaseBrowserToolExecutor {
             isError: false,
           };
         } catch (cdpError) {
-          console.warn('CDP click failed, falling back to DOM click:', cdpError);
+          if (cdpSent) {
+            // A press may already have landed; retrying through DOM could double-fire.
+            return createErrorResponse(
+              'E_UNCERTAIN: CDP click partially dispatched. Verify the page state before retrying.',
+            );
+          }
+          console.warn('CDP click failed before dispatching, falling back to DOM click:', cdpError);
         }
         const domResult = await clickTool.execute({
           tabId: tab.id as number,
