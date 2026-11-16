@@ -41,6 +41,12 @@ function isReadonlyCall(name: string, args: any): boolean {
   return READONLY_TOOLS.has(name);
 }
 
+/** begin must bypass the ownership gate so a stale owner can be challenged. */
+function isBeginCall(name: string, args: any): boolean {
+  if (name !== 'chrome_control_session') return false;
+  return String((args && args.action) || 'status') === 'begin';
+}
+
 /** begin/end must stay callable while suspended, otherwise recovery is impossible. */
 function isSessionControl(name: string, args: any): boolean {
   if (name !== 'chrome_control_session') return false;
@@ -165,7 +171,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
     const owner = getSessionOwner();
     const readonly = isReadonlyCall(param.name, param.args);
     // Ownership: a session that does not own the control session may only read.
-    if (owner && !readonly && owner !== sessionId) {
+    if (owner && !readonly && !isBeginCall(param.name, param.args) && owner !== sessionId) {
       return createErrorResponse(
         'E_SESSION_NOT_OWNER: browser control is owned by another agent session (' + owner + ').',
       );
