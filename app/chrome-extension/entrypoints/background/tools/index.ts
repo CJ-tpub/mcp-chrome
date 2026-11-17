@@ -109,37 +109,50 @@ const tabLocks = new Map<number, Promise<unknown>>();
 // ---- Foreground guard -------------------------------------------------------
 // A page may open its own tabs (target=_blank / window.open). Chromium activates
 // those, which yanks the user's foreground away even though the agent asked for
-// background behaviour. While a write action runs, any tab the page creates is
-// pushed back to the background and the previously active tab is restored.
+// background behaviour. While an action runs we watch for tabs created by the
+// target page, immediately push them back and restore the previous active tab.
 let guardDepth = 0;
 const guardPrevActive = new Map<number, number>();
+const guardCreated = new Set<number>();
 let guardTimer: ReturnType<typeof setTimeout> | null = null;
 let guardTargetTabId: number | null = null;
 
-function onGuardedTabCreated(tab: chrome.tabs.Tab): void {
-  if (tab.id === undefined || tab.windowId === undefined) return;
-  if (guardTargetTabId !== null && tab.openerTabId !== undefined && tab.openerTabId !== guardTargetTabId) {
-    return;
-  }
-  const newTabId = tab.id;
-  const windowId = tab.windowId;
-  setTimeout(async () => {
+function guardRestore(windowId: number, createdTabId: number): void {
+  const previous = guardPrevActive.get(windowId);
+  void (async () => {
     try {
-      const created = await chrome.tabs.get(newTabId);
-      if (!created.active) return;
-      const previous = guardPrevActive.get(windowId);
-      await chrome.tabs.update(newTabId, { active: false });
-      if (previous !== undefined) {
-        try {
-          await chrome.tabs.update(previous, { active: true });
-        } catch {
-          // the user may have closed it meanwhile
-        }
-      }
+      const created = await chrome.tabs.get(createdTabId);
+      if (created.active) await chrome.tabs.update(createdTabId, { active: false });
     } catch {
       // tab already gone
     }
-  }, 60);
+    if (previous !== undefined && previous !== createdTabId) {
+      try {
+        await chrome.tabs.update(previous, { active: true });
+      } catch {
+        // the user may have closed it meanwhile
+      }
+    }
+  })();
+}
+
+function onGuardedTabCreated(tab: chrome.tabs.Tab): void {
+  if (tab.id === undefined || tab.windowId === undefined) return;
+  // Only tabs this action opened; never touch tabs the user opens meanwhile.
+  if (guardTargetTabId !== null && tab.openerTabId !== undefined && tab.openerTabId !== guardTargetTabId) {
+    return;
+  }
+  guardCreated.add(tab.id);
+  const createdTabId = tab.id;
+  const windowId = tab.windowId;
+  // Two passes: kill the activation as it lands, then make sure it stayed down.
+  setTimeout(() => guardRestore(windowId, createdTabId), 0);
+  setTimeout(() => guardRestore(windowId, createdTabId), 350);
+}
+
+function onGuardedTabActivated(activeInfo: chrome.tabs.TabActiveInfo): void {
+  if (!guardCreated.has(activeInfo.tabId)) return;
+  guardRestore(activeInfo.windowId, activeInfo.tabId);
 }
 
 async function beginForegroundGuard(targetTabId?: number): Promise<void> {
@@ -154,16 +167,17 @@ async function beginForegroundGuard(targetTabId?: number): Promise<void> {
         }
       }
       chrome.tabs.onCreated.addListener(onGuardedTabCreated);
+      chrome.tabs.onActivated.addListener(onGuardedTabActivated);
     } catch {
       // best effort
     }
   }
   guardDepth += 1;
   if (guardTimer) clearTimeout(guardTimer);
-  // Keep listening briefly after the action so late window.open still gets caught.
+  // Short window: long windows would also catch tabs the *user* opens.
   guardTimer = setTimeout(() => {
     void endForegroundGuard();
-  }, 8000);
+  }, 3000);
 }
 
 async function endForegroundGuard(): Promise<void> {
@@ -172,9 +186,11 @@ async function endForegroundGuard(): Promise<void> {
   if (guardDepth > 0) return;
   try {
     chrome.tabs.onCreated.removeListener(onGuardedTabCreated);
+    chrome.tabs.onActivated.removeListener(onGuardedTabActivated);
   } catch {
     // ignore
   }
+  guardCreated.clear();
   if (guardTimer) {
     clearTimeout(guardTimer);
     guardTimer = null;
