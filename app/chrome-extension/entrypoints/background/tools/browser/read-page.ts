@@ -239,11 +239,48 @@ class ReadPageTool extends BaseBrowserToolExecutor {
         console.warn('read_page fallback failed:', fallbackErr);
       }
 
-      // If we reach here, both tree (usable) and fallback failed
+      // Last resort: plain text. This keeps read_page useful on media pages
+      // (sparse AX tree) and on stale tabs where the injected helper is gone.
+      try {
+        const extraction = await Promise.race([
+          chrome.scripting.executeScript({
+            target: { tabId: tab.id as number },
+            func: () => ({
+              title: document.title,
+              url: location.href,
+              text: document.body ? String(document.body.innerText || '').slice(0, 200000) : '',
+            }),
+          }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+        ]);
+        const data = (extraction as any)?.[0]?.result;
+        if (data && typeof data.text === 'string' && data.text.trim().length > 40) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  mode: 'text',
+                  note:
+                    'Accessibility tree unavailable (sparse page or a tab loaded before the last extension reload). ' +
+                    'Returned plain text instead; refresh the tab for a full accessibility tree.',
+                  url: data.url,
+                  title: data.title,
+                  pageContent: data.text,
+                }),
+              },
+            ],
+            isError: false,
+          };
+        }
+      } catch {
+        // fall through to the actionable error below
+      }
+
       return createErrorResponse(
-        treeOk
-          ? 'Accessibility tree is too sparse and fallback failed'
-          : resp?.error || 'Failed to generate accessibility tree and fallback failed',
+        'E_READ_PAGE_FAILED: accessibility tree and text fallback both failed. ' +
+          'This usually means the tab was opened before the last extension reload — refresh it and retry.',
       );
     } catch (error) {
       console.error('Error in read page tool:', error);
