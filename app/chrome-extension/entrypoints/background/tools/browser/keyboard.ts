@@ -150,6 +150,33 @@ class KeyboardTool extends BaseBrowserToolExecutor {
               });
               if (delay) await new Promise((r) => setTimeout(r, delay));
             }
+            // Many search/login forms only submit through their <form>. When the
+            // caller names a selector and pressed Enter, submit explicitly so the
+            // page behaves like a real user submit.
+            if (selector && /enter/i.test(String(keys))) {
+              await chrome.scripting
+                .executeScript({
+                  target: { tabId: tab.id },
+                  func: (sel: string) => {
+                    const el = document.querySelector(sel) as HTMLElement | null;
+                    if (!el) return false;
+                    const form = el.closest('form') as HTMLFormElement | null;
+                    if (!form) return false;
+                    try {
+                      form.requestSubmit();
+                    } catch {
+                      try {
+                        form.submit();
+                      } catch {
+                        return false;
+                      }
+                    }
+                    return true;
+                  },
+                  args: [String(selector)],
+                })
+                .catch(() => undefined);
+            }
           } finally {
             await cdpSessionManager.detach(tab.id, 'keyboard').catch(() => {});
           }
