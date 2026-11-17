@@ -149,7 +149,7 @@ async function beginForegroundGuard(targetTabId?: number): Promise<void> {
   // Keep listening briefly after the action so late window.open still gets caught.
   guardTimer = setTimeout(() => {
     void endForegroundGuard();
-  }, 2500);
+  }, 8000);
 }
 
 async function endForegroundGuard(): Promise<void> {
