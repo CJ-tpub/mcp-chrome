@@ -20,7 +20,7 @@ import {
 import { NativeMessagingHost } from '../native-messaging-host';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -244,11 +244,13 @@ export class Server {
   }
 
   private isAuthorized(request: FastifyRequest): boolean {
-    if (process.env.DSH_EDGE_NO_AUTH === '1') return true;
     const token = this.ensureAuthToken();
     const header = String(request.headers.authorization || '');
     if (!header.startsWith('Bearer ')) return false;
-    return header.slice(7).trim() === token;
+    const presented = Buffer.from(header.slice(7).trim());
+    const expected = Buffer.from(token);
+    if (presented.length !== expected.length) return false;
+    return timingSafeEqual(presented, expected);
   }
 
   private setupMcpRoutes(): void {

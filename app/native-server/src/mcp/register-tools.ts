@@ -101,12 +101,19 @@ export const setupTools = (server: Server, getSessionId?: () => string) => {
   );
 };
 
+const assertExposed = (name: string) => {
+  if (!EXPOSED_TOOL_NAMES.has(name)) {
+    throw new Error('E_TOOL_NOT_EXPOSED: ' + name + ' is not available over MCP');
+  }
+};
+
 const handleToolCall = async (
   name: string,
   args: any,
   sessionId?: string,
 ): Promise<CallToolResult> => {
   try {
+    assertExposed(name);
     // If calling a dynamic flow tool (name starts with flow.), proxy to common flow-run tool
     if (name && name.startsWith('flow.')) {
       // We need to resolve flow by slug to ID

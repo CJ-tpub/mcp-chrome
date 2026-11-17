@@ -65,11 +65,23 @@ export function setActiveOwner(owner: string): void {
   activeOwner = owner || '';
 }
 
+let lastPersistAt = 0;
+
 export function touchActivity(owner?: string): void {
-  // Only the owning session refreshes the lease; otherwise a bystander session
-  // could keep a dead owner's claim alive forever.
-  if (owner && current && current.owner && owner !== current.owner) return;
+  // Only a real owning session may refresh the lease. An empty id (UI / SSE
+  // paths) must never extend it, otherwise a stale owner never times out.
+  if (!owner) return;
+  if (current && current.owner && owner !== current.owner) return;
   lastActivityAt = Date.now();
+  // Persist sparingly so a service-worker restart keeps the takeover clock.
+  if (lastActivityAt - lastPersistAt > 3000) {
+    lastPersistAt = lastActivityAt;
+    try {
+      void chrome.storage.session.set({ 'dsh.controlLastActivity': lastActivityAt });
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export function getSessionOwner(): string {
@@ -179,6 +191,10 @@ export async function beginControlSession(
     policy?: Partial<ControlSessionPolicy>;
   } = {},
 ): Promise<ControlSessionState> {
+  if (!activeOwner && current && current.owner) {
+    // Anonymous callers (UI path) must not hijack or extend an agent session.
+    throw new Error('E_SESSION_BUSY: an agent session already owns the browser control session');
+  }
   if (current && current.owner && activeOwner && current.owner !== activeOwner) {
     const idleMs = lastActivityAt ? Date.now() - lastActivityAt : Number.MAX_SAFE_INTEGER;
     if (idleMs < 120000) {
@@ -241,6 +257,8 @@ export async function restoreControlSession(): Promise<void> {
   try {
     const stored = await chrome.storage.session.get([STATE_KEY, SUSPEND_KEY]);
     const suspended = stored?.[SUSPEND_KEY] as string | undefined;
+    const storedActivity = stored?.['dsh.controlLastActivity'] as number | undefined;
+    if (typeof storedActivity === 'number' && storedActivity > lastActivityAt) lastActivityAt = storedActivity;
     if (suspended) suspendedOwner = suspended;
     const state = stored?.[STATE_KEY] as ControlSessionState | undefined;
     if (!state) return;

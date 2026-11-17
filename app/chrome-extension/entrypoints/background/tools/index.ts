@@ -24,6 +24,42 @@ const WRITE_TOOLS = new Set([
 const SENSITIVE_HOST_RE =
   /(^|\.)(bank|banking|alipay|wechatpay|paypal|stripe|checkout|wallet)\.|(^|\.)(mail\.google|outlook\.live|mail\.qq|mail\.163)\./i;
 
+/** The only tools exposed over MCP; anything else is rejected at dispatch. */
+const EXPOSED_TOOL_NAMES = new Set([
+  'get_windows_and_tabs',
+  'chrome_navigate',
+  'chrome_screenshot',
+  'chrome_read_page',
+  'chrome_click_element',
+  'chrome_fill_or_select',
+  'chrome_keyboard',
+  'chrome_computer',
+  'chrome_get_web_content',
+  'chrome_switch_tab',
+  'chrome_close_tabs',
+  'chrome_control_session',
+]);
+
+/** Tools that attach the debugger even when they only read. */
+const DEBUGGER_TOOLS = new Set(['chrome_screenshot', 'chrome_computer']);
+
+/** Tools whose effects are worth auditing (writes plus navigation). */
+const AUDIT_TOOLS = new Set([
+  ...WRITE_TOOLS,
+  'chrome_navigate',
+  'chrome_switch_tab',
+  'chrome_close_tabs',
+]);
+
+/** Serialize audit writes so concurrent tabs cannot lose entries. */
+let auditChain: Promise<void> = Promise.resolve();
+function queueAudit(entry: AuditEntry): void {
+  auditChain = auditChain
+    .catch(() => undefined)
+    .then(() => appendAudit(entry))
+    .catch(() => undefined);
+}
+
 /** Tools that only read state; allowed for any MCP session. */
 const READONLY_TOOLS = new Set([
   'get_windows_and_tabs',
@@ -165,13 +201,17 @@ export const handleCallTool = async (param: ToolCallParam) => {
   }
 
   try {
+    if (!EXPOSED_TOOL_NAMES.has(param.name)) {
+      return createErrorResponse('E_TOOL_NOT_EXPOSED: ' + param.name + ' is not available over MCP.');
+    }
     const sessionId = (param as any).sessionId || '';
     setActiveOwner(sessionId);
 
     const owner = getSessionOwner();
     const readonly = isReadonlyCall(param.name, param.args);
     // Ownership: a session that does not own the control session may only read.
-    if (owner && !readonly && !isBeginCall(param.name, param.args) && owner !== sessionId) {
+    const beginExempt = isBeginCall(param.name, param.args) && !!sessionId;
+    if (owner && !readonly && !beginExempt && owner !== sessionId) {
       return createErrorResponse(
         'E_SESSION_NOT_OWNER: browser control is owned by another agent session (' + owner + ').',
       );
@@ -183,8 +223,30 @@ export const handleCallTool = async (param: ToolCallParam) => {
       );
     }
 
+    // A screenshot still attaches the debugger, which would resurrect the bar
+    // the user just dismissed.
+    if (!readonly && DEBUGGER_TOOLS.has(param.name) && isSuspendedFor(sessionId)) {
+      return createErrorResponse(
+        'E_SESSION_SUSPENDED: the user canceled browser debugging; screenshots are paused too.',
+      );
+    }
+
     const blocked = await guardWritePolicy(param.name, param.args);
-    if (blocked) return createErrorResponse(blocked);
+    if (blocked) {
+      if (AUDIT_TOOLS.has(param.name)) {
+        const blockedTab = param.args && param.args.tabId;
+        queueAudit({
+          ts: Date.now(),
+          session: sessionId,
+          tool: param.name,
+          tabId: typeof blockedTab === 'number' ? blockedTab : null,
+          origin: '',
+          method: 'blocked',
+          confirmed: false,
+        });
+      }
+      return createErrorResponse(blocked);
+    }
 
     // Only a valid, non-suspended owner refreshes the lease; rejected calls must
     // not keep a vanished owner's claim alive.
@@ -192,10 +254,25 @@ export const handleCallTool = async (param: ToolCallParam) => {
 
     const tabId = param.args && param.args.tabId;
     const run = () => tool.execute(param.args);
-    const result =
-      WRITE_TOOLS.has(param.name) && typeof tabId === 'number' ? await withTabLock(tabId, run) : await run();
+    let result: any;
+    try {
+      result = WRITE_TOOLS.has(param.name) && typeof tabId === 'number' ? await withTabLock(tabId, run) : await run();
+    } catch (execError: any) {
+      if (AUDIT_TOOLS.has(param.name)) {
+        queueAudit({
+          ts: Date.now(),
+          session: sessionId,
+          tool: param.name,
+          tabId: typeof tabId === 'number' ? tabId : null,
+          origin: '',
+          method: 'failed',
+          confirmed: false,
+        });
+      }
+      throw execError;
+    }
 
-    if (WRITE_TOOLS.has(param.name)) {
+    if (AUDIT_TOOLS.has(param.name)) {
       let url = '';
       if (typeof tabId === 'number') {
         try {
@@ -204,7 +281,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
           // tab gone
         }
       }
-      void appendAudit({
+      queueAudit({
         ts: Date.now(),
         session: sessionId,
         tool: param.name,
