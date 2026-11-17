@@ -68,11 +68,25 @@ const READONLY_TOOLS = new Set([
   'chrome_get_web_content',
 ]);
 
+/** Computer actions that only move the viewport / inspect; they never change page state. */
+const READONLY_COMPUTER_ACTIONS = new Set(['scroll', 'hover', 'wait', 'screenshot', 'move']);
+
+/** Navigation keys do not enter text; treat them as read-only. */
+const NAVIGATION_KEY_RE = /^(PageDown|PageUp|Home|End|ArrowUp|ArrowDown|ArrowLeft|ArrowRight)$/;
+
 /** control_session is only readonly for status/audit; policy mutates state. */
 function isReadonlyCall(name: string, args: any): boolean {
   if (name === 'chrome_control_session') {
     const action = String((args && args.action) || 'status');
     return action === 'status' || action === 'audit';
+  }
+  if (name === 'chrome_computer') {
+    return READONLY_COMPUTER_ACTIONS.has(String((args && args.action) || ''));
+  }
+  if (name === 'chrome_keyboard') {
+    const keys = String((args && (args.keys ?? args.text)) || '');
+    const parts = keys.split(',').map((s) => s.trim()).filter(Boolean);
+    return parts.length > 0 && parts.every((k) => NAVIGATION_KEY_RE.test(k));
   }
   return READONLY_TOOLS.has(name);
 }
@@ -226,6 +240,9 @@ function withTabLock<T>(tabId: number, fn: () => Promise<T>): Promise<T> {
 
 async function guardWritePolicy(name: string, args: any): Promise<string | null> {
   if (!WRITE_TOOLS.has(name)) return null;
+  // Scrolling / hovering / navigation keys never mutate the page, even on
+  // banking or webmail hosts, so they must not require a confirm token.
+  if (isReadonlyCall(name, args)) return null;
   if (args && args.confirm === true) return null;
   const policy = await readPolicy();
   if (policy.confirmMode === 'off') return null;
@@ -328,7 +345,15 @@ export const handleCallTool = async (param: ToolCallParam) => {
     touchActivity(sessionId);
 
     const tabId = param.args && param.args.tabId;
-    const run = () => tool.execute(param.args);
+    const TOOL_DEADLINE_MS = 25000;
+    const withDeadline = <R>(work: Promise<R>): Promise<R> =>
+      Promise.race([
+        work,
+        new Promise<R>((_resolve, reject) =>
+          setTimeout(() => reject(new Error('E_TOOL_TIMEOUT: tool did not answer within ' + TOOL_DEADLINE_MS + 'ms')), TOOL_DEADLINE_MS),
+        ),
+      ]);
+    const run = () => withDeadline(Promise.resolve(tool.execute(param.args)));
     const guarded = WRITE_TOOLS.has(param.name) || param.name === 'chrome_navigate';
     if (guarded) await beginForegroundGuard(typeof tabId === 'number' ? tabId : undefined);
     let result: any;
