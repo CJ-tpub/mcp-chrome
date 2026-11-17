@@ -930,9 +930,24 @@ class ComputerTool extends BaseBrowserToolExecutor {
         }
       }
       case 'scroll': {
-        if (!params.coordinates && !params.ref)
-          return createErrorResponse('Provide ref or coordinates for scroll');
+        // Wheel events work anywhere inside the viewport, so an explicit anchor is
+        // optional: default to a point near the visual centre of the page.
         let coord = params.coordinates ? project(params.coordinates)! : (undefined as any);
+        if (!coord) {
+          try {
+            const dims: any = await cdpSessionManager
+              .sendCommand(tab.id, 'Runtime.evaluate', {
+                expression: '({ w: window.innerWidth, h: window.innerHeight })',
+                returnByValue: true,
+              })
+              .catch(() => null);
+            const w = Number(dims?.result?.value?.w) || 800;
+            const h = Number(dims?.result?.value?.h) || 600;
+            coord = project({ x: Math.round(w / 2), y: Math.round(h / 2) })!;
+          } catch {
+            coord = project({ x: 400, y: 300 })!;
+          }
+        }
         if (params.ref) {
           try {
             await this.injectContentScript(tab.id, ['inject-scripts/accessibility-tree-helper.js']);
