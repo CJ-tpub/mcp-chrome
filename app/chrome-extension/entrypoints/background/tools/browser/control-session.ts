@@ -420,9 +420,13 @@ class ControlSessionTool {
         // debugger API unavailable
       }
       if (action === 'policy') {
-        const mode = String(args?.confirmMode || '');
+        // Accept both the documented `mode` and the historic `confirmMode`.
+        const rawMode = args?.confirmMode ?? args?.mode ?? args?.policy?.confirmMode;
+        const mode = String(rawMode || '');
         if (!['narrow', 'always', 'off'].includes(mode)) {
-          return createErrorResponse('E_BAD_ARG: confirmMode must be narrow | always | off');
+          return createErrorResponse(
+            'E_BAD_ARG: confirmMode must be narrow | always | off (use confirmMode, or mode as an alias)',
+          );
         }
         try {
           await chrome.storage.local.set({ 'dsh.policy': { confirmMode: mode } });
