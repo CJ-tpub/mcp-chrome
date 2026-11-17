@@ -224,6 +224,30 @@ class ClickTool extends BaseBrowserToolExecutor {
       );
 
       if (!result) {
+        // Nothing was clicked yet (the content script never answered), so a CDP
+        // click is safe. If the element does not exist we can answer precisely.
+        if (finalSelector) {
+          const clicked = await withToolTimeout(cdpClickAt(tab.id, finalSelector), 9000);
+          if (clicked) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Element clicked successfully (CDP input)',
+                    path: 'cdp',
+                    selector: finalSelector,
+                  }),
+                },
+              ],
+              isError: false,
+            };
+          }
+          return createErrorResponse(
+            'E_ELEMENT_NOT_FOUND: no element matched selector "' + finalSelector + '".',
+          );
+        }
         return createErrorResponse(
           'E_UNCERTAIN: the page never answered the click (background tab may be throttled). ' +
             'No retry was attempted to avoid a double action. Verify the page state before retrying.',
