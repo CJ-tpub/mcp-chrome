@@ -196,7 +196,11 @@ class ClickTool extends BaseBrowserToolExecutor {
         }
       }
 
-      await this.injectContentScript(tab.id, ['inject-scripts/click-helper.js']);
+      // Bounded: heavy pages can stall frame injection for tens of seconds.
+      await withToolTimeout(
+        this.injectContentScript(tab.id, ['inject-scripts/click-helper.js']),
+        6000,
+      );
 
       // Send click message to content script (bounded: a background tab may never answer)
       const result = await withToolTimeout(
@@ -386,24 +390,51 @@ class FillTool extends BaseBrowserToolExecutor {
         }
       }
 
-      await this.injectContentScript(tab.id, ['inject-scripts/fill-helper.js']);
+      // Frame injection can stall on heavy SPA pages (never call it unbounded).
+      const injected = await withToolTimeout(
+        this.injectContentScript(tab.id, ['inject-scripts/fill-helper.js']),
+        6000,
+      );
 
       // Send fill message to content script, but never hang: background tabs can
       // throttle the injected helper so the reply never arrives.
-      const result = await withToolTimeout(
-        this.sendMessageToTab(
-          tab.id,
-          {
-            action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
-            selector: finalSelector,
-            ref: finalRef,
-            value,
-          },
-          frameId,
-        ),
-      );
+      const result = injected
+        ? await withToolTimeout(
+            this.sendMessageToTab(
+              tab.id,
+              {
+                action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
+                selector: finalSelector,
+                ref: finalRef,
+                value,
+              },
+              frameId,
+            ),
+          )
+        : null;
 
       if (!result) {
+        // The content-script path never answered. Filling through CDP is safe
+        // here because nothing was typed yet (the helper was never reached).
+        if (finalSelector) {
+          const ok = await withToolTimeout(cdpFillAt(tab.id, finalSelector, String(value)), 9000);
+          if (ok) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Element filled successfully (CDP input)',
+                    path: 'cdp',
+                    selector: finalSelector,
+                  }),
+                },
+              ],
+              isError: false,
+            };
+          }
+        }
         return createErrorResponse(
           'E_UNCERTAIN: the page never answered the fill request (background tab may be throttled). ' +
             'No retry was attempted to avoid duplicating text. Verify the field value before retrying.',
