@@ -3,6 +3,42 @@ import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import { TOOL_MESSAGE_TYPES } from '@/common/message-types';
 import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
+import { cdpSessionManager } from '@/utils/cdp-session-manager';
+
+/** Trusted (isTrusted=true) key dispatch via CDP. Synthetic DOM events are ignored
+ * by many SPAs (e.g. site search boxes), so prefer real input when we can. */
+const CDP_KEYS: Record<string, { key: string; code: string; vk: number; text?: string }> = {
+  Enter: { key: 'Enter', code: 'Enter', vk: 13, text: '\r' },
+  Tab: { key: 'Tab', code: 'Tab', vk: 9 },
+  Escape: { key: 'Escape', code: 'Escape', vk: 27 },
+  Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+  Delete: { key: 'Delete', code: 'Delete', vk: 46 },
+  Space: { key: ' ', code: 'Space', vk: 32, text: ' ' },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+  Home: { key: 'Home', code: 'Home', vk: 36 },
+  End: { key: 'End', code: 'End', vk: 35 },
+  PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
+  PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+};
+
+const MODIFIER_BITS: Record<string, number> = { Alt: 1, Control: 2, Ctrl: 2, Meta: 4, Shift: 8 };
+
+function resolveKeyToken(token: string): { key: string; code: string; vk: number; text?: string } | null {
+  const trimmed = token.trim();
+  if (CDP_KEYS[trimmed]) return CDP_KEYS[trimmed];
+  if (trimmed.length === 1) {
+    const ch = trimmed;
+    const upper = ch.toUpperCase();
+    const isLetter = /[a-z]/i.test(ch);
+    const isDigit = /[0-9]/.test(ch);
+    const vk = isLetter ? upper.charCodeAt(0) : isDigit ? ch.charCodeAt(0) : ch.charCodeAt(0);
+    return { key: ch, code: isLetter ? 'Key' + upper : isDigit ? 'Digit' + ch : '', vk, text: ch };
+  }
+  return null;
+}
 
 interface KeyboardToolParams {
   keys: string; // Required: string representing keys or key combinations to simulate (e.g., "Enter", "Ctrl+C")
@@ -41,6 +77,62 @@ class KeyboardTool extends BaseBrowserToolExecutor {
       const tab = explicit || (await this.getActiveTabOrThrowInWindow(args.windowId));
       if (!tab.id) {
         return createErrorResponse(ERROR_MESSAGES.TAB_NOT_FOUND + ': Active tab has no ID');
+      }
+
+      // Preferred path: real CDP key events (trusted).
+      try {
+        const chords = String(keys).split(',').map((s) => s.trim()).filter(Boolean);
+        const parsed = chords.map((chord) => {
+          const parts = chord.split('+').map((s) => s.trim()).filter(Boolean);
+          if (!parts.length) return null;
+          const keyToken = parts.pop() as string;
+          const mods = parts.reduce((mask, m) => mask | (MODIFIER_BITS[m] || 0), 0);
+          const key = resolveKeyToken(keyToken);
+          return key ? { ...key, mods } : null;
+        });
+        if (parsed.length && parsed.every(Boolean)) {
+          await cdpSessionManager.attach(tab.id, 'keyboard');
+          try {
+            for (const item of parsed as any[]) {
+              await cdpSessionManager.sendCommand(tab.id, 'Input.dispatchKeyEvent', {
+                type: 'keyDown',
+                key: item.key,
+                code: item.code,
+                windowsVirtualKeyCode: item.vk,
+                nativeVirtualKeyCode: item.vk,
+                modifiers: item.mods,
+                text: item.mods ? undefined : item.text,
+              });
+              await cdpSessionManager.sendCommand(tab.id, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: item.key,
+                code: item.code,
+                windowsVirtualKeyCode: item.vk,
+                nativeVirtualKeyCode: item.vk,
+                modifiers: item.mods,
+              });
+              if (delay) await new Promise((r) => setTimeout(r, delay));
+            }
+          } finally {
+            await cdpSessionManager.detach(tab.id, 'keyboard').catch(() => {});
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  message: 'Keyboard events dispatched (CDP, trusted)',
+                  keys: String(keys),
+                  path: 'cdp',
+                }),
+              },
+            ],
+            isError: false,
+          };
+        }
+      } catch (cdpError) {
+        console.warn('[keyboard] CDP path failed, falling back to DOM:', cdpError);
       }
 
       let finalSelector = selector;
