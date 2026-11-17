@@ -257,15 +257,23 @@ export async function endControlSession(force = false): Promise<ControlSessionSt
   const tabs = [...pinned];
   pinned.clear();
   groupByWindow.clear();
-  for (const tabId of tabs) {
-    try {
-      await cdpSessionManager.detach(tabId, CONTROL_SESSION_OWNER);
-    } catch {
-      // best effort
-    }
-    await unmark(tabId);
-  }
-  await persist();
+  // Cleanup must be bounded and independent per tab: one slow tab must never
+  // leave the others attached (that is how sessions used to leak debuggers).
+  await Promise.allSettled(
+    tabs.map(async (tabId) => {
+      const detached = await withBudget(
+        cdpSessionManager.detach(tabId, CONTROL_SESSION_OWNER),
+        5000,
+        'detach',
+      );
+      if (detached === undefined && cdpSessionManager.isAttached(tabId)) {
+        // Last resort: force a raw detach so the debug banner cannot stick.
+        await withBudget(chrome.debugger.detach({ tabId }).catch(() => undefined), 4000, 'force-detach');
+      }
+      await withBudget(unmark(tabId), 4000, 'unmark');
+    }),
+  );
+  await withBudget(persist(), 3000, 'persist-end');
   return previous;
 }
 
