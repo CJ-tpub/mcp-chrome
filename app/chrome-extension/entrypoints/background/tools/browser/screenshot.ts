@@ -197,11 +197,34 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
       ]);
         await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_CONSTANTS.SCRIPT_INIT_DELAY));
 
+        // The helper occasionally stops answering on busy SPA tabs; fail fast
+        // instead of burning the whole tool budget.
+        const boundedHelper = async (work: Promise<any>, ms: number, label: string) => {
+          const out = await Promise.race([
+            work.catch(() => null),
+            new Promise((resolve) => setTimeout(() => resolve('__timeout__'), ms)),
+          ]);
+          if (out === '__timeout__') {
+            throw new Error(
+              'E_SCREENSHOT_HELPER_TIMEOUT: ' +
+                label +
+                ' did not answer within ' +
+                ms +
+                'ms (busy tab). Retry once; the second attempt usually succeeds.',
+            );
+          }
+          return out;
+        };
+
         // Prepare page (hide scrollbars, handle fixed elements)
-        const prepareResp = await this.sendMessageToTab(tab.id!, {
-          action: TOOL_MESSAGE_TYPES.SCREENSHOT_PREPARE_PAGE_FOR_CAPTURE,
-          options: { fullPage },
-        });
+        const prepareResp = await boundedHelper(
+          this.sendMessageToTab(tab.id!, {
+            action: TOOL_MESSAGE_TYPES.SCREENSHOT_PREPARE_PAGE_FOR_CAPTURE,
+            options: { fullPage },
+          }),
+          9000,
+          'page preparation',
+        );
         if (!prepareResp || prepareResp.success !== true) {
           throw new Error(
             'Screenshot helper did not acknowledge page preparation. The content script may not be injected or cannot run on this page.',
@@ -210,9 +233,13 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
         didPreparePage = true;
 
         // Get page details with validation
-        const rawPageDetails = await this.sendMessageToTab(tab.id!, {
-          action: TOOL_MESSAGE_TYPES.SCREENSHOT_GET_PAGE_DETAILS,
-        });
+        const rawPageDetails = await boundedHelper(
+          this.sendMessageToTab(tab.id!, {
+            action: TOOL_MESSAGE_TYPES.SCREENSHOT_GET_PAGE_DETAILS,
+          }),
+          9000,
+          'page details',
+        );
         pageDetails = assertValidPageDetails(rawPageDetails);
         originalScroll = { x: pageDetails.currentScrollX, y: pageDetails.currentScrollY };
 
