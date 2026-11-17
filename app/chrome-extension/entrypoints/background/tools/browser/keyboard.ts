@@ -128,6 +128,18 @@ class KeyboardTool extends BaseBrowserToolExecutor {
                 modifiers: item.mods,
                 text: item.mods ? undefined : item.text,
               });
+              // A real key press also emits a char event; form submit handlers and
+              // some SPAs rely on it (keyup alone is not enough for Enter).
+              if (!item.mods && item.text) {
+                await cdpSessionManager
+                  .sendCommand(tab.id, 'Input.dispatchKeyEvent', {
+                    type: 'char',
+                    key: item.key,
+                    text: item.text,
+                    unmodifiedText: item.text,
+                  })
+                  .catch(() => undefined);
+              }
               await cdpSessionManager.sendCommand(tab.id, 'Input.dispatchKeyEvent', {
                 type: 'keyUp',
                 key: item.key,
