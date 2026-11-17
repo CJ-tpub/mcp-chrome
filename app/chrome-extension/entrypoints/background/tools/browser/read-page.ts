@@ -62,13 +62,20 @@ class ReadPageTool extends BaseBrowserToolExecutor {
       // Inject helper in ISOLATED world to enable chrome.runtime messaging
       // Inject into all frames to support same-origin iframe operations
       const readTree = async (allFrames: boolean, timeoutMs: number, depthOverride?: number) => {
-        await this.injectContentScript(
-          tab.id as number,
-          ['inject-scripts/accessibility-tree-helper.js'],
-          false,
-          'ISOLATED',
-          allFrames,
-        );
+        try {
+          await this.injectContentScript(
+            tab.id as number,
+            ['inject-scripts/accessibility-tree-helper.js'],
+            false,
+            'ISOLATED',
+            allFrames,
+          );
+        } catch (injectError) {
+          // A busy or just-reloaded tab can refuse injection; fall back instead
+          // of failing the whole read.
+          console.warn('[read_page] helper injection failed:', injectError);
+          return null;
+        }
         return this.sendMessageToTab(
           tab.id as number,
           {

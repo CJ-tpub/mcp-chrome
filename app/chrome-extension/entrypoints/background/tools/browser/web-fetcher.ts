@@ -138,10 +138,24 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
         extracted = null;
       }
 
+      // One bounded retry: a tab that was just refreshed is often busy for a
+      // second or two, and the second attempt almost always succeeds.
+      if (!extracted && timedOut) {
+        try {
+          extracted = await Promise.race([
+            extract(),
+            new Promise<any>((_resolve, reject) => setTimeout(() => reject(new Error('retry-timeout')), 8000)),
+          ]);
+          timedOut = false;
+        } catch {
+          extracted = null;
+        }
+      }
+
       if (!extracted) {
         return createErrorResponse(
           timedOut
-            ? 'E_EXTRACT_TIMEOUT: could not extract page content within 10s (page may be busy or discarding frames). Try chrome_read_page or chrome_screenshot instead.'
+            ? 'E_EXTRACT_TIMEOUT: could not extract page content within 10s+8s (page may be busy or discarding frames). Try chrome_read_page or chrome_screenshot instead.'
             : 'E_ELEMENT_NOT_FOUND: no element matched selector "' +
                 String(selector) +
                 '" on this page (the page rendered fine, the selector did not match).',
