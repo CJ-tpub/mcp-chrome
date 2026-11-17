@@ -226,6 +226,37 @@ class ClickTool extends BaseBrowserToolExecutor {
         );
       }
 
+      if (result.backgroundOpen) {
+        // The target is a link that would open (and activate) a new tab. Open it
+        // ourselves in the background so the user's foreground never changes.
+        try {
+          const created = await chrome.tabs.create({
+            url: String(result.backgroundOpen),
+            active: false,
+            windowId: tab.windowId,
+            openerTabId: tab.id,
+          });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: true,
+                  message: 'Link opened in a background tab (foreground untouched)',
+                  tabId: created.id,
+                  url: result.backgroundOpen,
+                  elementInfo: result.elementInfo,
+                  openedInBackground: true,
+                }),
+              },
+            ],
+            isError: false,
+          };
+        } catch (openError) {
+          // fall through to a normal click if the background open failed
+        }
+      }
+
       if (result.error && /not found/i.test(String(result.error))) {
         // Definitive "element missing" means nothing was clicked yet: CDP is safe.
         if (finalSelector && (await cdpClickAt(tab.id, finalSelector))) {

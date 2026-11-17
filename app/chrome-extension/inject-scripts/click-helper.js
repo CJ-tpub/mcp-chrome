@@ -177,6 +177,20 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
         });
       }
 
+      // Never let the page activate a new tab while an agent is driving:
+      // report the URL so the extension can open it in the background instead.
+      if (!double && element) {
+        const backgroundUrl = resolveBackgroundOpenUrl(element, options);
+        if (backgroundUrl) {
+          return {
+            success: true,
+            backgroundOpen: backgroundUrl,
+            message: 'Link opens a new tab; opened in the background instead of clicking',
+            elementInfo,
+          };
+        }
+      }
+
       if (
         element &&
         (elementInfo.clickMethod === 'selector' || elementInfo.clickMethod === 'ref')
@@ -260,6 +274,27 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
       clientY: y,
       view: window,
     };
+  }
+
+  /**
+   * A link with target=_blank (or ctrl/meta click) makes Chromium create and
+   * ACTIVATE a new tab, which steals the user's foreground. Report the URL to
+   * the extension instead so it can open it in the background.
+   */
+  function resolveBackgroundOpenUrl(element, options) {
+    try {
+      const anchor = element && element.closest ? element.closest('a[href]') : null;
+      if (!anchor) return null;
+      const href = anchor.getAttribute('href') || '';
+      if (!href || href.startsWith('#') || /^javascript:/i.test(href)) return null;
+      const target = String(anchor.getAttribute('target') || '').toLowerCase();
+      const mod = (options && options.modifiers) || {};
+      const modified = !!(mod.ctrlKey || mod.metaKey);
+      if (target !== '_blank' && !modified) return null;
+      return new URL(href, location.href).href;
+    } catch {
+      return null;
+    }
   }
 
   function dispatchClickSequence(element, x, y, options = {}, isDouble = false) {
