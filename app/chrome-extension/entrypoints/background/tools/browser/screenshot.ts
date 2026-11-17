@@ -191,7 +191,10 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
       // === Path 2: Helper-assisted capture (requires content script) ===
       if (!finalImageDataUrl) {
         // Always inject helper when we need pageDetails
-        await this.injectContentScript(tab.id!, ['inject-scripts/screenshot-helper.js']);
+        await Promise.race([
+        this.injectContentScript(tab.id!, ['inject-scripts/screenshot-helper.js']).catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 6000)),
+      ]);
         await new Promise((resolve) => setTimeout(resolve, SCREENSHOT_CONSTANTS.SCRIPT_INIT_DELAY));
 
         // Prepare page (hide scrollbars, handle fixed elements)
