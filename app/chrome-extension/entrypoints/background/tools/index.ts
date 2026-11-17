@@ -92,6 +92,81 @@ function isSessionControl(name: string, args: any): boolean {
 
 const tabLocks = new Map<number, Promise<unknown>>();
 
+// ---- Foreground guard -------------------------------------------------------
+// A page may open its own tabs (target=_blank / window.open). Chromium activates
+// those, which yanks the user's foreground away even though the agent asked for
+// background behaviour. While a write action runs, any tab the page creates is
+// pushed back to the background and the previously active tab is restored.
+let guardDepth = 0;
+const guardPrevActive = new Map<number, number>();
+let guardTimer: ReturnType<typeof setTimeout> | null = null;
+let guardTargetTabId: number | null = null;
+
+function onGuardedTabCreated(tab: chrome.tabs.Tab): void {
+  if (tab.id === undefined || tab.windowId === undefined) return;
+  if (guardTargetTabId !== null && tab.openerTabId !== undefined && tab.openerTabId !== guardTargetTabId) {
+    return;
+  }
+  const newTabId = tab.id;
+  const windowId = tab.windowId;
+  setTimeout(async () => {
+    try {
+      const created = await chrome.tabs.get(newTabId);
+      if (!created.active) return;
+      const previous = guardPrevActive.get(windowId);
+      await chrome.tabs.update(newTabId, { active: false });
+      if (previous !== undefined) {
+        try {
+          await chrome.tabs.update(previous, { active: true });
+        } catch {
+          // the user may have closed it meanwhile
+        }
+      }
+    } catch {
+      // tab already gone
+    }
+  }, 60);
+}
+
+async function beginForegroundGuard(targetTabId?: number): Promise<void> {
+  guardTargetTabId = typeof targetTabId === 'number' ? targetTabId : null;
+  if (guardDepth === 0) {
+    try {
+      const activeTabs = await chrome.tabs.query({ active: true });
+      guardPrevActive.clear();
+      for (const tab of activeTabs) {
+        if (tab.id !== undefined && tab.windowId !== undefined) {
+          guardPrevActive.set(tab.windowId, tab.id);
+        }
+      }
+      chrome.tabs.onCreated.addListener(onGuardedTabCreated);
+    } catch {
+      // best effort
+    }
+  }
+  guardDepth += 1;
+  if (guardTimer) clearTimeout(guardTimer);
+  // Keep listening briefly after the action so late window.open still gets caught.
+  guardTimer = setTimeout(() => {
+    void endForegroundGuard();
+  }, 2500);
+}
+
+async function endForegroundGuard(): Promise<void> {
+  if (guardDepth === 0) return;
+  guardDepth -= 1;
+  if (guardDepth > 0) return;
+  try {
+    chrome.tabs.onCreated.removeListener(onGuardedTabCreated);
+  } catch {
+    // ignore
+  }
+  if (guardTimer) {
+    clearTimeout(guardTimer);
+    guardTimer = null;
+  }
+}
+
 const AUDIT_KEY = 'dsh.audit';
 const POLICY_KEY = 'dsh.policy';
 
@@ -254,6 +329,8 @@ export const handleCallTool = async (param: ToolCallParam) => {
 
     const tabId = param.args && param.args.tabId;
     const run = () => tool.execute(param.args);
+    const guarded = WRITE_TOOLS.has(param.name) || param.name === 'chrome_navigate';
+    if (guarded) await beginForegroundGuard(typeof tabId === 'number' ? tabId : undefined);
     let result: any;
     try {
       result = WRITE_TOOLS.has(param.name) && typeof tabId === 'number' ? await withTabLock(tabId, run) : await run();
@@ -270,6 +347,8 @@ export const handleCallTool = async (param: ToolCallParam) => {
         });
       }
       throw execError;
+    } finally {
+      if (guarded) void endForegroundGuard();
     }
 
     if (AUDIT_TOOLS.has(param.name)) {
