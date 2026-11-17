@@ -86,19 +86,21 @@ class CDPHelper {
     if (already) return;
     void installCursor(tabId);
     // Make a background tab behave as if focused (input + rendering) without
-    // bringing it, or its window, to the foreground.
-    try {
-      await cdpSessionManager.sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', {
-        enabled: true,
-      });
-    } catch {
-      // older Chromium: ignore
-    }
-    try {
-      await cdpSessionManager.sendCommand(tabId, 'Page.setWebLifecycleState', { state: 'active' });
-    } catch {
-      // ignore
-    }
+    // bringing it, or its window, to the foreground. These are best-effort
+    // niceties: a busy renderer must never hold the whole action hostage.
+    const bounded = <R>(work: Promise<R>, ms: number): Promise<R | undefined> =>
+      Promise.race([
+        work,
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
+      ]).catch(() => undefined);
+    await bounded(
+      cdpSessionManager.sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }),
+      1200,
+    );
+    await bounded(
+      cdpSessionManager.sendCommand(tabId, 'Page.setWebLifecycleState', { state: 'active' }),
+      1200,
+    );
   }
 
   static async detach(tabId: number): Promise<void> {
