@@ -61,21 +61,46 @@ class ReadPageTool extends BaseBrowserToolExecutor {
 
       // Inject helper in ISOLATED world to enable chrome.runtime messaging
       // Inject into all frames to support same-origin iframe operations
-      await this.injectContentScript(
-        tab.id,
-        ['inject-scripts/accessibility-tree-helper.js'],
-        false,
-        'ISOLATED',
-        true,
-      );
+      const readTree = async (allFrames: boolean, timeoutMs: number, depthOverride?: number) => {
+        await this.injectContentScript(
+          tab.id as number,
+          ['inject-scripts/accessibility-tree-helper.js'],
+          false,
+          'ISOLATED',
+          allFrames,
+        );
+        return this.sendMessageToTab(
+          tab.id as number,
+          {
+            action: TOOL_MESSAGE_TYPES.GENERATE_ACCESSIBILITY_TREE,
+            filter: filter || null,
+            depth: depthOverride === undefined ? requestedDepth : depthOverride,
+            refId: focusRefId || undefined,
+          },
+          undefined,
+          timeoutMs,
+        );
+      };
 
-      // Ask content script to generate accessibility tree
-      const resp = await this.sendMessageToTab(tab.id, {
-        action: TOOL_MESSAGE_TYPES.GENERATE_ACCESSIBILITY_TREE,
-        filter: filter || null,
-        depth: requestedDepth,
-        refId: focusRefId || undefined,
-      });
+      // Heavy pages (video portals, social feeds) may have thousands of nodes and
+      // cross-origin frames. Try the full walk once, then degrade to the main
+      // frame with a shallow default rather than burning the host timeout.
+      let resp: any;
+      let degraded = false;
+      try {
+        resp = await readTree(true, 14000);
+      } catch (firstError: any) {
+        if (!String(firstError?.message || '').includes('E_CONTENT_TIMEOUT')) throw firstError;
+        degraded = true;
+        try {
+          resp = await readTree(false, 9000, requestedDepth === undefined ? 12 : requestedDepth);
+        } catch (secondError: any) {
+          return createErrorResponse(
+            'E_READ_TIMEOUT: this page is too heavy to walk (content script did not answer). ' +
+              'Try chrome_screenshot for the viewport, or chrome_read_page with an explicit small depth (e.g. depth:8).',
+          );
+        }
+      }
 
       // Evaluate tree result and decide whether to fallback
       const treeOk = resp && resp.success === true;
@@ -96,6 +121,9 @@ class ReadPageTool extends BaseBrowserToolExecutor {
         ? pageContent.split('\n').filter((l: string) => l.trim().length > 0).length
         : 0;
       const refCount = Array.isArray(resp?.refMap) ? resp.refMap.length : 0;
+      if (degraded) {
+        try { resp.degraded = true; } catch { /* frozen response */ }
+      }
 
       // Skip sparse heuristics when user explicitly controls output
       const isSparse = !userControlled && lines < 10 && refCount < 3;

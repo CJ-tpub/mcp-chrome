@@ -86,12 +86,28 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
   /**
    * Send message to tab
    */
-  protected async sendMessageToTab(tabId: number, message: any, frameId?: number): Promise<any> {
+  protected async sendMessageToTab(
+    tabId: number,
+    message: any,
+    frameId?: number,
+    timeoutMs = 12000,
+  ): Promise<any> {
     try {
-      const response =
+      const send =
         typeof frameId === 'number'
-          ? await chrome.tabs.sendMessage(tabId, message, { frameId })
-          : await chrome.tabs.sendMessage(tabId, message);
+          ? chrome.tabs.sendMessage(tabId, message, { frameId })
+          : chrome.tabs.sendMessage(tabId, message);
+      // A busy/hung content script (huge DOM traversal, blocked main thread)
+      // must never hold the caller until the host-wide 120s timeout.
+      const response = await Promise.race([
+        send,
+        new Promise((_resolve, reject) =>
+          setTimeout(
+            () => reject(new Error('E_CONTENT_TIMEOUT: content script did not answer within ' + timeoutMs + 'ms')),
+            timeoutMs,
+          ),
+        ),
+      ]);
 
       if (response && response.error) {
         throw new Error(String(response.error));
