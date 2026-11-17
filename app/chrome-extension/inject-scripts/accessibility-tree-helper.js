@@ -12,14 +12,10 @@
   const MAX_NODES = 4000; // hard limit to avoid long blocking on huge DOMs
   const MAX_LINE_LABEL = 100; // max characters for a single label in output
   const REF_MAP_LIMIT = 1000; // limit size of the ref map to keep payload small
-  const TIME_BUDGET_MS = 3500; // hard wall-clock budget for one tree walk
 
   // Keep a weak map from ref id to elements
   if (!window.__claudeElementMap) window.__claudeElementMap = {};
   if (!window.__claudeRefCounter) window.__claudeRefCounter = 0;
-  // Reverse index: scanning __claudeElementMap for every node is O(n^2) and was
-  // the reason heavy pages (video portals) never finished a walk.
-  if (!window.__claudeElementRefIndex) window.__claudeElementRefIndex = new WeakMap();
 
   /**
    * Infer ARIA-like role from element
@@ -534,25 +530,22 @@
     const maxDepth = cfg && typeof cfg.maxDepth === 'number' ? cfg.maxDepth : MAX_DEPTH;
     if (depth > maxDepth || !el || !el.tagName) return;
     if (state.processed >= MAX_NODES) return;
-    if (state.startedAt && Date.now() - state.startedAt > TIME_BUDGET_MS) {
-      state.truncated = true;
-      return;
-    }
     if (state.visited.has(el)) return;
     state.visited.add(el);
     const include = shouldInclude(el, cfg) || depth === 0;
     if (include) {
       const role = inferRole(el);
       let label = inferLabel(el);
-      let refId = window.__claudeElementRefIndex.get(el) || null;
+      let refId = null;
+      for (const k in window.__claudeElementMap) {
+        if (window.__claudeElementMap[k].deref && window.__claudeElementMap[k].deref() === el) {
+          refId = k;
+          break;
+        }
+      }
       if (!refId) {
         refId = `ref_${++window.__claudeRefCounter}`;
         window.__claudeElementMap[refId] = new WeakRef(el);
-        try {
-          window.__claudeElementRefIndex.set(el, refId);
-        } catch {
-          // non-object guard
-        }
       }
       const rect = /** @type {HTMLElement} */ (el).getBoundingClientRect();
       const cx = Math.round(rect.left + rect.width / 2);
@@ -639,7 +632,7 @@
       }
 
       const refMap = [];
-      const state = { processed: 0, included: 0, visited: new WeakSet(), startedAt: Date.now(), truncated: false };
+      const state = { processed: 0, included: 0, visited: new WeakSet() };
 
       // Determine root element (body or refId-specified element)
       let focus = null;

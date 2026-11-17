@@ -59,27 +59,15 @@ class ReadPageTool extends BaseBrowserToolExecutor {
       const currentUrl = String(tab.url || '');
       const userMarkers = currentUrl ? await listMarkersForUrl(currentUrl) : [];
 
-      // A frame that never reaches document_idle (ads, beacons) must not block
-      // the whole read, so inject immediately and cap every step with a deadline.
-      const withDeadline = <R>(work: Promise<R>, ms: number, label: string): Promise<R> =>
-        Promise.race([
-          work,
-          new Promise<R>((_resolve, reject) =>
-            setTimeout(() => reject(new Error('E_TIMEOUT: ' + label + ' exceeded ' + ms + 'ms')), ms),
-          ),
-        ]);
-
+      // Inject helper in ISOLATED world to enable chrome.runtime messaging
+      // Inject into all frames to support same-origin iframe operations
       const readTree = async (allFrames: boolean, timeoutMs: number, depthOverride?: number) => {
-        await withDeadline(
-          this.injectContentScript(
-            tab.id as number,
-            ['inject-scripts/accessibility-tree-helper.js'],
-            true,
-            'ISOLATED',
-            allFrames,
-          ),
-          7000,
-          'inject_helper(allFrames=' + allFrames + ')',
+        await this.injectContentScript(
+          tab.id as number,
+          ['inject-scripts/accessibility-tree-helper.js'],
+          false,
+          'ISOLATED',
+          allFrames,
         );
         return this.sendMessageToTab(
           tab.id as number,
@@ -100,17 +88,12 @@ class ReadPageTool extends BaseBrowserToolExecutor {
       let resp: any;
       let degraded = false;
       try {
-        resp = await withDeadline(readTree(true, 12000), 20000, 'read_tree_all_frames');
+        resp = await readTree(true, 14000);
       } catch (firstError: any) {
-        const msg = String(firstError?.message || '');
-        if (!msg.includes('E_CONTENT_TIMEOUT') && !msg.includes('E_TIMEOUT')) throw firstError;
+        if (!String(firstError?.message || '').includes('E_CONTENT_TIMEOUT')) throw firstError;
         degraded = true;
         try {
-          resp = await withDeadline(
-            readTree(false, 8000, requestedDepth === undefined ? 12 : requestedDepth),
-            13000,
-            'read_tree_main_frame',
-          );
+          resp = await readTree(false, 9000, requestedDepth === undefined ? 12 : requestedDepth);
         } catch (secondError: any) {
           return createErrorResponse(
             'E_READ_TIMEOUT: this page is too heavy to walk (content script did not answer). ' +
