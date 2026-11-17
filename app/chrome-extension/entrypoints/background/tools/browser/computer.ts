@@ -570,6 +570,50 @@ class ComputerTool extends BaseBrowserToolExecutor {
           if (stale) return stale;
         }
         const coord = project(params.coordinates)!;
+        // A coordinate click can land on a link that opens a new tab. Resolve it
+        // first and open in the background instead of letting Chromium activate
+        // a fresh tab (that would steal the user's foreground).
+        try {
+          const probe = await chrome.scripting.executeScript({
+            target: { tabId: tab.id as number },
+            func: (px: number, py: number) => {
+              const el = document.elementFromPoint(px, py) as Element | null;
+              const anchor = el && el.closest ? (el.closest('a[href]') as HTMLAnchorElement | null) : null;
+              if (!anchor) return null;
+              const target = String(anchor.getAttribute('target') || '').toLowerCase();
+              if (target !== '_blank') return null;
+              return anchor.href || null;
+            },
+            args: [Math.round(coord.x), Math.round(coord.y)],
+          });
+          const backgroundUrl = (probe && probe[0] && probe[0].result) as string | null;
+          if (backgroundUrl) {
+            const created = await chrome.tabs.create({
+              url: backgroundUrl,
+              active: false,
+              windowId: tab.windowId,
+              openerTabId: tab.id,
+            });
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    success: true,
+                    message: 'Link opened in a background tab (foreground untouched)',
+                    tabId: created.id,
+                    url: backgroundUrl,
+                    openedInBackground: true,
+                  }),
+                },
+              ],
+              isError: false,
+            };
+          }
+        } catch {
+          // best effort; fall through to a real click
+        }
+
         // Prefer DOM path via existing click tool
         // Prefer a real CDP input event (isTrusted=true, triggers the cursor
         // overlay) and fall back to the DOM click helper only if CDP fails.
