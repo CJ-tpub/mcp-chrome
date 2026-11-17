@@ -138,8 +138,13 @@ class KeyboardTool extends BaseBrowserToolExecutor {
       let finalSelector = selector;
       let refForFocus: string | undefined = undefined;
 
-      // Ensure helper is loaded for XPath or potential focus operations
-      await this.injectContentScript(tab.id, ['inject-scripts/accessibility-tree-helper.js']);
+      // Frame injection can stall on heavy pages; never let it consume the call.
+      await Promise.race([
+        this.injectContentScript(tab.id, ['inject-scripts/accessibility-tree-helper.js']).catch(
+          () => undefined,
+        ),
+        new Promise((resolve) => setTimeout(resolve, 6000)),
+      ]);
 
       // If selector is XPath, convert to ref then try to get CSS selector
       if (selector && selectorType === 'xpath') {
