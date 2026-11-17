@@ -81,7 +81,15 @@ class KeyboardTool extends BaseBrowserToolExecutor {
 
       // Preferred path: real CDP key events (trusted).
       try {
-        const chords = String(keys).split(',').map((s) => s.trim()).filter(Boolean);
+        const rawChords = String(keys).split(',').map((s) => s.trim()).filter(Boolean);
+        const chords = rawChords.flatMap((chord) => {
+          const plain = chord.split('+').map((s) => s.trim()).filter(Boolean);
+          // "abc" (no modifiers) means three literal characters, not one key.
+          if (plain.length === 1 && plain[0].length > 1 && !CDP_KEYS[plain[0]]) {
+            return plain[0].split('');
+          }
+          return [chord];
+        });
         const parsed = chords.map((chord) => {
           const parts = chord.split('+').map((s) => s.trim()).filter(Boolean);
           if (!parts.length) return null;
@@ -91,6 +99,23 @@ class KeyboardTool extends BaseBrowserToolExecutor {
           return key ? { ...key, mods } : null;
         });
         if (parsed.length && parsed.every(Boolean)) {
+          // Focus the requested element first: CDP key events go to whatever is
+          // focused, and a previous fill/click may have moved focus elsewhere.
+          if (selector) {
+            await chrome.scripting
+              .executeScript({
+                target: { tabId: tab.id },
+                func: (sel: string) => {
+                  const el = document.querySelector(sel) as HTMLElement | null;
+                  if (!el) return false;
+                  el.focus();
+                  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) el.select();
+                  return document.activeElement === el;
+                },
+                args: [String(selector)],
+              })
+              .catch(() => undefined);
+          }
           await cdpSessionManager.attach(tab.id, 'keyboard');
           try {
             for (const item of parsed as any[]) {
