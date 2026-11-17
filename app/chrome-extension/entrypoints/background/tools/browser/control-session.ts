@@ -163,20 +163,37 @@ async function unmark(tabId: number): Promise<void> {
 }
 
 /** Pin a tab to the active control session (idempotent). */
+/** Never let one slow step (attach/group/badge) hold an entire session begin. */
+function withBudget<R>(work: Promise<R>, ms: number, label: string): Promise<R | undefined> {
+  return Promise.race([
+    work,
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
+  ]).catch(() => undefined);
+}
+
 export async function ensurePinned(tabId: number): Promise<boolean> {
   if (!current) return false;
   if (suspendedOwner && suspendedOwner === current.owner) return false;
   if (pinned.has(tabId)) return cdpSessionManager.isAttached(tabId);
   lastActivityAt = Date.now();
   try {
-    await cdpSessionManager.attach(tabId, CONTROL_SESSION_OWNER);
+    const attached = await withBudget(
+      cdpSessionManager.attach(tabId, CONTROL_SESSION_OWNER),
+      8000,
+      'attach',
+    );
+    if (attached === undefined && !cdpSessionManager.isAttached(tabId)) {
+      console.warn('[control-session] attach timed out for tab', tabId);
+      return false;
+    }
     pinned.add(tabId);
     if (!current.tabIds.includes(tabId)) {
       current.tabIds.push(tabId);
       void persist();
     }
-    await ensureGrouped(tabId, current.label);
-    await ensureMarked(tabId);
+    // Group + badge are cosmetic: never block the session on them.
+    await withBudget(ensureGrouped(tabId, current.label), 6000, 'group');
+    await withBudget(ensureMarked(tabId), 5000, 'badge');
     return true;
   } catch (error) {
     console.warn('[control-session] failed to pin tab', tabId, error);
@@ -227,7 +244,7 @@ export async function beginControlSession(
     lastActivityAt = Date.now();
     await persist();
   }
-  for (const tabId of options.tabIds || []) await ensurePinned(tabId);
+  await Promise.allSettled((options.tabIds || []).map((tabId) => ensurePinned(tabId)));
   return current;
 }
 
