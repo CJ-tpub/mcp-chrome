@@ -248,7 +248,7 @@ class ReadPageTool extends BaseBrowserToolExecutor {
             func: () => ({
               title: document.title,
               url: location.href,
-              text: document.body ? String(document.body.innerText || '').slice(0, 200000) : '',
+              text: document.body ? String(document.body.textContent || '').slice(0, 200000) : '',
             }),
           }),
           new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),

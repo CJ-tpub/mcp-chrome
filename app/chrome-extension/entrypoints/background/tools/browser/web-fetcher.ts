@@ -111,7 +111,9 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
             return {
               title: document.title,
               url: location.href,
-              textContent: el.innerText || el.textContent || '',
+              // textContent does not force a layout pass (innerText does), which
+              // matters on huge SPAs where a full reflow can exceed any tool budget.
+              textContent: el.textContent || '',
               htmlContent: el.innerHTML || '',
             };
           },
