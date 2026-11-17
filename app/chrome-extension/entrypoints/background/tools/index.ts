@@ -180,6 +180,17 @@ async function beginForegroundGuard(targetTabId?: number): Promise<void> {
   }, 3000);
 }
 
+let guardEndTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Keep watching for a tail period: page-initiated tabs often appear after the ack. */
+function scheduleGuardEnd(): void {
+  if (guardEndTimer) return;
+  guardEndTimer = setTimeout(() => {
+    guardEndTimer = null;
+    void endForegroundGuard();
+  }, 2500);
+}
+
 async function endForegroundGuard(): Promise<void> {
   if (guardDepth === 0) return;
   guardDepth -= 1;
@@ -389,7 +400,9 @@ export const handleCallTool = async (param: ToolCallParam) => {
       }
       throw execError;
     } finally {
-      if (guarded) void endForegroundGuard();
+      // Do not tear the guard down immediately: window.open() from the page can
+      // land hundreds of milliseconds after the action's promise resolves.
+      if (guarded) scheduleGuardEnd();
     }
 
     if (AUDIT_TOOLS.has(param.name)) {
