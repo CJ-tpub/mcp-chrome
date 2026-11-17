@@ -97,53 +97,49 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
         title: tab.title,
       };
 
-      await this.injectContentScript(tab.id, ['inject-scripts/web-fetcher-helper.js']);
-
-      // Get HTML content if requested
-      if (htmlContent) {
-        const htmlResponse = await this.sendMessageToTab(tab.id, {
-          action: TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_HTML_CONTENT,
-          selector: selector,
-        });
-
-        if (htmlResponse.success) {
-          result.htmlContent = htmlResponse.htmlContent;
-        } else {
-          console.error('Failed to get HTML content:', htmlResponse.error);
-          result.htmlContentError = htmlResponse.error;
-        }
-      }
-
-      // Get text content if requested (and htmlContent is not true)
-      if (textContent) {
-        const textResponse = await this.sendMessageToTab(tab.id, {
-          action: TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_TEXT_CONTENT,
-          selector: selector,
-        });
-
-        if (textResponse.success) {
-          result.textContent = textResponse.textContent;
-
-          // Include article metadata if available
-          if (textResponse.article) {
-            result.article = {
-              title: textResponse.article.title,
-              byline: textResponse.article.byline,
-              siteName: textResponse.article.siteName,
-              excerpt: textResponse.article.excerpt,
-              lang: textResponse.article.lang,
+      // Extract directly with scripting.executeScript (main frame). The old
+      // content-script helper could hang for tens of seconds on heavy pages
+      // (frame injection waits, big DOM walks), which made this tool unusable
+      // on real sites. A bounded direct extraction is both faster and safer.
+      const extract = async (): Promise<any> => {
+        const [res] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id as number },
+          func: (sel: string | null) => {
+            const root = sel ? document.querySelector(sel) : document.body;
+            if (!root) return null;
+            const el = root as HTMLElement;
+            return {
+              title: document.title,
+              url: location.href,
+              textContent: el.innerText || el.textContent || '',
+              htmlContent: el.innerHTML || '',
             };
-          }
+          },
+          args: [selector ? String(selector) : null],
+        });
+        return (res && res.result) || null;
+      };
 
-          // Include page metadata if available
-          if (textResponse.metadata) {
-            result.metadata = textResponse.metadata;
-          }
-        } else {
-          console.error('Failed to get text content:', textResponse.error);
-          result.textContentError = textResponse.error;
-        }
+      let extracted: any = null;
+      try {
+        extracted = await Promise.race([
+          extract(),
+          new Promise<any>((_resolve, reject) =>
+            setTimeout(() => reject(new Error('E_EXTRACT_TIMEOUT')), 10000),
+          ),
+        ]);
+      } catch {
+        extracted = null;
       }
+
+      if (!extracted) {
+        return createErrorResponse(
+          'E_EXTRACT_TIMEOUT: could not extract page content within 10s (page may be busy or discarding frames). Try chrome_read_page or chrome_screenshot instead.',
+        );
+      }
+
+      if (htmlContent) result.htmlContent = extracted.htmlContent;
+      if (textContent) result.textContent = extracted.textContent;
 
       // Interactive elements feature has been removed
 
