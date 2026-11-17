@@ -373,6 +373,28 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
 
     this.logInfo('Screenshot completed!');
 
+      // Tell callers how screenshot pixels map to click coordinates.
+      try {
+        const [meta] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id as number },
+          func: () => ({
+            width: window.innerWidth,
+            height: window.innerHeight,
+            dpr: window.devicePixelRatio,
+          }),
+        });
+        const m = (meta as any)?.result;
+        if (m) {
+          results.cssViewport = { width: m.width, height: m.height };
+          results.devicePixelRatio = m.dpr;
+          results.coordinateSpace = 'css';
+          results.coordinateNote =
+            'chrome_computer coordinates are CSS pixels. Divide screenshot pixels by devicePixelRatio (and browser zoom) before clicking.';
+        }
+      } catch {
+        // metadata is best effort
+      }
+
     return {
       content: [
         {
@@ -570,26 +592,4 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
   }
 }
 
-export const screenshotTool = new ScreenshotTool();      // Tell callers how screenshot pixels map to click coordinates.
-      try {
-        const [meta] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id as number },
-          func: () => ({
-            width: window.innerWidth,
-            height: window.innerHeight,
-            dpr: window.devicePixelRatio,
-          }),
-        });
-        const m = (meta as any)?.result;
-        if (m) {
-          results.cssViewport = { width: m.width, height: m.height };
-          results.devicePixelRatio = m.dpr;
-          results.coordinateSpace = 'css';
-          results.coordinateNote =
-            'chrome_computer coordinates are CSS pixels. Divide screenshot pixels by devicePixelRatio (and browser zoom) before clicking.';
-        }
-      } catch {
-        // metadata is best effort
-      }
-
-
+export const screenshotTool = new ScreenshotTool();
