@@ -2,6 +2,9 @@ import { ToolExecutor } from '@/common/tool-handler';
 import type { ToolResult } from '@/common/tool-handler';
 import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
 
+/** Hard ceiling for content-script injection (all tools inherit this). */
+const INJECT_TIMEOUT_MS = 8000;
+
 const PING_TIMEOUT_MS = 300;
 
 /**
@@ -64,7 +67,11 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
       } else if (allFrames) {
         target.allFrames = true;
       }
-      await chrome.scripting.executeScript({
+      // Frame injection has no intrinsic deadline: on heavy pages it can hang
+      // for tens of seconds and blow the tool budget. Bound it here once so
+      // every tool inherits the protection.
+      await Promise.race([
+        chrome.scripting.executeScript({
         target,
         files,
         injectImmediately,
@@ -143,7 +150,19 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
    * Get the active tab in the current window. Throws when not found.
    */
   protected async getActiveTabOrThrow(): Promise<chrome.tabs.Tab> {
-    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true }),
+        new Promise((_resolve, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `E_INJECT_TIMEOUT: injecting ${files.join(',')} into tab ${tabId} took longer than ${INJECT_TIMEOUT_MS}ms`,
+                ),
+              ),
+            INJECT_TIMEOUT_MS,
+          ),
+        ),
+      ]);
     if (!active || !active.id) throw new Error('Active tab not found');
     return active;
   }
