@@ -148,6 +148,13 @@ async function ensureMarked(tabId: number): Promise<void> {
 }
 
 async function unmark(tabId: number): Promise<void> {
+  // Ungroup FIRST: it is the most visible residue, and cosmetics below may be
+  // slow enough to consume the caller's budget.
+  try {
+    await chrome.tabs.ungroup(tabId);
+  } catch {
+    // tab may be gone or never grouped
+  }
   try {
     await chrome.action.setBadgeText({ tabId, text: '' });
   } catch {
@@ -155,11 +162,6 @@ async function unmark(tabId: number): Promise<void> {
   }
   await setFaviconBadge(tabId, false);
   await hideCursor(tabId);
-  try {
-    await chrome.tabs.ungroup(tabId);
-  } catch {
-    // tab may be gone or never grouped
-  }
 }
 
 /** Pin a tab to the active control session (idempotent). */
@@ -261,6 +263,7 @@ export async function endControlSession(force = false): Promise<ControlSessionSt
   // leave the others attached (that is how sessions used to leak debuggers).
   await Promise.allSettled(
     tabs.map(async (tabId) => {
+      await withBudget(chrome.tabs.ungroup(tabId).catch(() => undefined), 3000, 'ungroup');
       const detached = await withBudget(
         cdpSessionManager.detach(tabId, CONTROL_SESSION_OWNER),
         5000,
@@ -277,8 +280,24 @@ export async function endControlSession(force = false): Promise<ControlSessionSt
   return previous;
 }
 
+/** Remove control groups left behind by a crash or an extension reload. */
+async function cleanupOrphanGroups(): Promise<void> {
+  try {
+    const groups = await chrome.tabGroups.query({});
+    for (const group of groups) {
+      if (!group.id || !String(group.title || '').startsWith('DSH · ')) continue;
+      const tabs = await chrome.tabs.query({ groupId: group.id });
+      const ids = tabs.map((tab) => tab.id).filter((id): id is number => typeof id === 'number');
+      if (ids.length) await chrome.tabs.ungroup(ids);
+    }
+  } catch {
+    // best effort
+  }
+}
+
 /** Re-attach pinned tabs after a service-worker restart. */
 export async function restoreControlSession(): Promise<void> {
+  await cleanupOrphanGroups();
   try {
     const stored = await chrome.storage.session.get([STATE_KEY, SUSPEND_KEY]);
     const suspended = stored?.[SUSPEND_KEY] as string | undefined;
