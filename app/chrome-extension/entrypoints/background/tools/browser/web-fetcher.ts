@@ -121,11 +121,15 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
       };
 
       let extracted: any = null;
+      let timedOut = false;
       try {
         extracted = await Promise.race([
           extract(),
           new Promise<any>((_resolve, reject) =>
-            setTimeout(() => reject(new Error('E_EXTRACT_TIMEOUT')), 10000),
+            setTimeout(() => {
+              timedOut = true;
+              reject(new Error('E_EXTRACT_TIMEOUT'));
+            }, 10000),
           ),
         ]);
       } catch {
@@ -134,7 +138,11 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
 
       if (!extracted) {
         return createErrorResponse(
-          'E_EXTRACT_TIMEOUT: could not extract page content within 10s (page may be busy or discarding frames). Try chrome_read_page or chrome_screenshot instead.',
+          timedOut
+            ? 'E_EXTRACT_TIMEOUT: could not extract page content within 10s (page may be busy or discarding frames). Try chrome_read_page or chrome_screenshot instead.'
+            : 'E_ELEMENT_NOT_FOUND: no element matched selector "' +
+                String(selector) +
+                '" on this page (the page rendered fine, the selector did not match).',
         );
       }
 
